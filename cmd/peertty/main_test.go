@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"peertty/internal/active"
 	"peertty/internal/grant"
 )
 
@@ -95,5 +97,59 @@ func TestRejectedCLIArguments(t *testing.T) {
 	}
 	if err := run(t.Context(), []string{"keygen", "-h"}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("subcommand help: %v", err)
+	}
+}
+
+func TestInactiveCLICommands(t *testing.T) {
+	state := t.TempDir()
+	out, err := commandOutput(t, "status", "-state-dir", state)
+	if err != nil || out != active.ErrInactive.Error() {
+		t.Fatalf("inactive status: %q, %v", out, err)
+	}
+	out, err = commandOutput(t, "revoke", "-state-dir", state)
+	if !errors.Is(err, active.ErrInactive) || out != "" {
+		t.Fatalf("inactive revoke: %q, %v", out, err)
+	}
+}
+
+func TestApprovalInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want, wantErr string
+	}{
+		{name: "path", input: "  my session.answer  \nignored\n", want: "my session.answer"},
+		{name: "blank", input: "  \n", wantErr: "session declined"},
+		{name: "EOF", wantErr: "session declined"},
+		{name: "oversized line", input: strings.Repeat("a", 128*1024), wantErr: "token too long"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "answer")
+			if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+				t.Fatal(err)
+			}
+			in, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer in.Close()
+			saved := os.Stdin
+			os.Stdin = in
+			defer func() { os.Stdin = saved }()
+			got, err := approval(t.Context())
+			if got != tc.want || (tc.wantErr == "" && err != nil) ||
+				(tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr))) {
+				t.Fatalf("approval = %q, %v; want %q, error containing %q", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCommandContextStops(t *testing.T) {
+	for _, args := range [][]string{nil, {"menu"}, {"connect"}, {"_menu-proxy"}, {"_link-proxy"}} {
+		ctx, stop := commandContext(args)
+		before := ctx.Err()
+		stop()
+		if before != nil || !errors.Is(ctx.Err(), context.Canceled) {
+			t.Errorf("commandContext(%q): before stop = %v, after = %v", args, before, ctx.Err())
+		}
 	}
 }
