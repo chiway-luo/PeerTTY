@@ -1,0 +1,72 @@
+package active
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"peertty/internal/grant"
+	"time"
+)
+
+const Command = "_grant"
+
+func Start(ctx context.Context, opts Options) (State, error) {
+	var state State
+	exe, err := os.Executable()
+	if err != nil {
+		return state, err
+	}
+	// Send bootstrap settings through a private pipe; credentials stay out of argv.
+	var input bytes.Buffer
+	if err = send(&input, opts); err != nil {
+		return state, err
+	}
+	read, write, err := os.Pipe()
+	if err != nil {
+		return state, err
+	}
+	defer read.Close()
+	cmd := exec.Command(exe, Command)
+	detach(cmd)
+	cmd.Stdin, cmd.Stdout = &input, write
+	if err = cmd.Start(); err != nil {
+		write.Close()
+		return state, err
+	}
+	write.Close()
+	go cmd.Wait()
+	ready := make(chan error, 1)
+	var result reply
+	go func() { ready <- receive(read, &result) }()
+	timer := time.NewTimer(8 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return state, ctx.Err()
+	case <-timer.C:
+		return state, errors.New("后台授权进程启动超时")
+	case err = <-ready:
+		if err != nil {
+			return state, fmt.Errorf("无法启动后台授权进程: %w", err)
+		}
+		if result.Error != "" {
+			if result.Error == grant.ErrInUse.Error() {
+				return state, grant.ErrInUse
+			}
+			return state, errors.New(result.Error)
+		}
+		return result.State, nil
+	}
+}
+
+// Main reports startup errors before the parent returns to its prompt.
+func Main(ctx context.Context) error {
+	err := Serve(ctx, os.Stdin, os.Stdout)
+	if err != nil {
+		_ = send(os.Stdout, reply{Error: err.Error()})
+	}
+	return err
+}

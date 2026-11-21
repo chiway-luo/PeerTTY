@@ -1,0 +1,16 @@
+name: peertty
+version: ${PEERTTY_VERSION}
+arch: ${PEERTTY_ARCH}
+platform: linux
+release: 1
+section: net
+priority: optional
+maintainer: PeerTTY Project <peertty@localhost>
+description: Single-session peer-to-peer SSH terminal with local approval.
+contents:
+  - src: ./peertty
+    dst: /usr/bin/peertty
+    file_info:
+      mode: 0755
+      owner: root
+      group: root

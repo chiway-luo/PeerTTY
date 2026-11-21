@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>PeerTTY</title>
+  <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <choices-outline><line choice="peertty"/></choices-outline>
+  <choice id="peertty" visible="false">
+    <pkg-ref id="io.peertty.core"/>
+    <pkg-ref id="io.peertty.cli"/>
+  </choice>
+  <pkg-ref id="io.peertty.core">core.pkg</pkg-ref>
+  <pkg-ref id="io.peertty.cli">cli.pkg</pkg-ref>
+</installer-gui-script>

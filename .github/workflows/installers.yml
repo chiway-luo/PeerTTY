@@ -1,0 +1,106 @@
+name: Check native installers
+on: workflow_dispatch
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    outputs:
+      first: ${{ steps.versions.outputs.first }}
+      second: ${{ steps.versions.outputs.second }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: brew install nfpm msitools
+      - id: versions
+        shell: bash
+        run: |
+          first=$(cat VERSION)
+          second=$(python3 -c 'from pathlib import Path; a,b,c=map(int,Path("VERSION").read_text().split(".")); print(f"{a}.{b}.{c+1}")')
+          echo "first=$first" >> "$GITHUB_OUTPUT"
+          echo "second=$second" >> "$GITHUB_OUTPUT"
+      - run: |
+          python3 packaging/build.py
+          python3 packaging/build.py --version "${{ steps.versions.outputs.second }}" --output "$RUNNER_TEMP/next"
+      - name: Install, upgrade and remove the macOS package
+        shell: bash
+        env:
+          FIRST: ${{ steps.versions.outputs.first }}
+          SECOND: ${{ steps.versions.outputs.second }}
+        run: |
+          set -eu
+          state=$(mktemp -d)
+          sudo installer -pkg "dist/installers/$FIRST/PeerTTY-macOS.pkg" -target /
+          test "$(peertty --version)" = "PeerTTY $FIRST"
+          printf '0\n' | peertty menu -state-dir "$state" -stun none
+          fingerprint=$(peertty fingerprint -key "$state/device.key")
+          sudo installer -pkg "$RUNNER_TEMP/next/installers/$SECOND/PeerTTY-macOS.pkg" -target /
+          test "$(peertty --version)" = "PeerTTY $SECOND"
+          test "$(peertty fingerprint -key "$state/device.key")" = "$fingerprint"
+          sudo rm /usr/local/bin/peertty /Library/PeerTTY/peertty
+          sudo rmdir /Library/PeerTTY
+          sudo pkgutil --forget io.peertty.cli
+          sudo pkgutil --forget io.peertty.core
+          test ! -e /usr/local/bin/peertty
+          test ! -e /Library/PeerTTY/peertty
+          test -s "$state/device.key"
+          rm -r "$state"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/installers/${{ steps.versions.outputs.first }}/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-test-only
+          path: ${{ runner.temp }}/next/installers/${{ steps.versions.outputs.second }}/
+          retention-days: 1
+
+  linux:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            name: peertty_amd64.deb
+          - image: fedora:latest
+            name: peertty.x86_64.rpm
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+          path: first
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-test-only
+          path: second
+      - run: sh packaging/check-linux.sh "first/${{ matrix.name }}" "second/${{ matrix.name }}"
+
+  windows:
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: windows-11-arm
+            arch: ARM64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+          path: first
+      - uses: actions/download-artifact@v4
+        with:
+          name: upgrade-test-only
+          path: second
+      - shell: pwsh
+        run: |
+          ./packaging/check-windows.ps1 -FirstMsi "first/PeerTTY-Windows-${{ matrix.arch }}.msi" -SecondMsi "second/PeerTTY-Windows-${{ matrix.arch }}.msi" -FirstVersion "${{ needs.build.outputs.first }}" -SecondVersion "${{ needs.build.outputs.second }}"

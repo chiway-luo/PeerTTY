@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="$(var.ProductCode)" Name="PeerTTY" Language="1033"
+           Version="$(var.Version)" Manufacturer="PeerTTY Project"
+           UpgradeCode="6FD4DC9A-694D-4A83-AE25-EFB8EC4B1D1D">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser"/>
+    <Media Id="1" Cabinet="peertty.cab" EmbedCab="yes"/>
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of PeerTTY is installed."/>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="UserPrograms" Name="Programs">
+          <Directory Id="INSTALLDIR" Name="PeerTTY">
+            <Component Id="Cli" Guid="$(var.ComponentCode)" Win64="yes">
+              <RegistryValue Root="HKCU" Key="Software\PeerTTY\Installer" Name="Version"
+                             Type="string" Value="[ProductVersion]" KeyPath="yes"/>
+              <File Id="PeerTTYExe" Name="peertty.exe" Source="peertty.exe"/>
+              <Environment Id="UserPath" Name="Path" Action="set" Part="last" Value="[INSTALLDIR]" System="no"/>
+              <Shortcut Id="PeerTTYMenu" Directory="ProgramMenuFolder" Name="PeerTTY"
+                        Target="[#PeerTTYExe]" WorkingDirectory="INSTALLDIR"/>
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
+    <Feature Id="Main" Title="PeerTTY" Level="1"><ComponentRef Id="Cli"/></Feature>
+    <InstallExecuteSequence>
+      <RemoveExistingProducts After="InstallInitialize"/>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

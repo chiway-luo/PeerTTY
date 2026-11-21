@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Control PeerTTY's two local Linux guests and their private WAN."""
+import argparse
+import concurrent.futures
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import secrets
+import select
+import shutil
+import subprocess
+import sys
+
+
+LAB = Path(__file__).resolve().parent
+LIMA = LAB / ".lima"
+ENV = dict(os.environ, LIMA_HOME=str(LIMA))
+ROLES = ("engineer", "device")
+LAN = {"engineer": "10.77.1.2", "device": "10.77.2.2"}
+OBSERVER = {"engineer": "198.19.1.2", "device": "198.19.2.2"}
+# Linux netem parameters in engineer -> device, then device -> engineer order.
+PROFILES = {
+    "clean": ("", ""),
+    "extreme": (
+        "delay 300ms 80ms loss 12% duplicate 1% reorder 4% rate 256kbit",
+        "delay 650ms 150ms loss 22% duplicate 2% reorder 8% rate 96kbit",
+    ),
+    "one-way": ("", "loss 100%"),
+    "udp-blocked": ("", ""),
+    "offline": ("loss 100%", "loss 100%"),
+}
+
+
+def run(cmd, **kwargs):
+    return subprocess.run(cmd, check=True, env=ENV, text=True, **kwargs)
+
+
+def shell(role, *args):
+    return ["limactl", "shell", "--workdir=/tmp", role, *args]
+
+
+def guest(role, action, *args, **kwargs):
+    return run(shell(role, "sudo", "bash", "-s", "--", action, role, *args),
+               input=(LAB / "guest-network.sh").read_text(), **kwargs)
+
+
+def desired():
+    path = LIMA / "peertty-profile"
+    if not path.exists():
+        return "extreme", "nat"
+    fields = path.read_text().split()
+    if len(fields) != 2 or fields[0] not in PROFILES or fields[1] not in ("routed", "nat", "nat-remap", "nat-dependent"):
+        raise ValueError(f"Invalid saved network profile in {path}")
+    return tuple(fields)
+
+
+def apply_pair(profile, mode):
+    for role, settings in zip(ROLES, PROFILES[profile]):
+        guest(role, "profile", profile, mode, *settings.split())
+
+
+def active_profile():
+    expected = desired()
+    for role in ROLES:
+        value = run(shell(role, "cat", "/run/peertty-lab/profile"), stdout=subprocess.PIPE).stdout
+        if tuple(value.split()) != expected:
+            raise ValueError(f"{role}: network state differs from the saved profile; run lab/ctl up")
+    return expected
+
+
+def set_profile(profile, mode):
+    previous = desired()
+    try:
+        apply_pair(profile, mode)
+        tmp = LIMA / "peertty-profile.tmp"
+        tmp.write_text(f"{profile} {mode}\n")
+        tmp.replace(LIMA / "peertty-profile")
+    except (OSError, subprocess.CalledProcessError, KeyboardInterrupt):
+        # A guest may have changed its firewall before reporting a qdisc error.
+        # Try both sides independently, even if one is temporarily unreachable.
+        print("Network update incomplete. Restoring:", *previous, file=sys.stderr)
+        for role, settings in zip(ROLES, PROFILES[previous[0]]):
+            try:
+                guest(role, "profile", *previous, *settings.split())
+            except (OSError, subprocess.CalledProcessError):
+                print(f"{role}: restore pending; run lab/ctl up", file=sys.stderr)
+        raise
+    print(f"{profile} ({mode})", flush=True)
+
+
+def underlay(role):
+    data = json.loads(run(shell(role, "ip", "-j", "-4", "addr", "show", "scope", "global"),
+                          stdout=subprocess.PIPE).stdout)
+    ips = [ipaddress.IPv4Address(a["local"]) for nic in data for a in nic["addr_info"]]
+    if len(ips) != 1:
+        raise ValueError(f"Expected one Lima management IP on {role}, found {ips}")
+    return str(ips[0])
+
+
+def prepare_ssh():
+    # Only the SSH public keys cross the management channel.
+    keygen = """set -eu
+umask 077
+mkdir -p "$HOME/.ssh"
+key="$HOME/.ssh/peertty-lab"
+if [ ! -f "$key" ]; then ssh-keygen -q -t ed25519 -N '' -f "$key" </dev/null; fi
+ssh-keygen -y -f "$key"
+"""
+    public = run(shell("engineer", "sh", "-c", keygen), stdout=subprocess.PIPE).stdout.strip()
+    host = run(shell("device", "sudo", "bash", "-s", "--", public),
+               input=(LAB / "guest-sshd.sh").read_text(), stdout=subprocess.PIPE).stdout
+    if not host.startswith("peertty-device ssh-ed25519 "):
+        raise ValueError("Missing device SSH host key")
+    write_known = 'umask 077; cat > "$HOME/.ssh/peertty-lab-known-hosts"'
+    run(shell("engineer", "sh", "-c", write_known), input=host)
+
+
+def up():
+    LIMA.mkdir(mode=0o700, exist_ok=True)
+    LIMA.chmod(0o700)
+    for role in ROLES:
+        target = [role] if (LIMA / role / "lima.yaml").exists() else [
+            "--name", role, str(LAB / "vm.yaml")]
+        run(["limactl", "start", "--tty=false", *target])
+    addresses = {role: underlay(role) for role in ROLES}
+    if addresses["engineer"] == addresses["device"]:
+        raise ValueError("The two Lima guests have the same management address")
+    for role, peer in zip(ROLES, reversed(ROLES)):
+        guest(role, "setup", addresses[role], addresses[peer])
+        guest(role, "stun")
+    prepare_ssh()
+    set_profile(*desired())
+
+
+def inventory():
+    output = run(["limactl", "list", "--json"], stdout=subprocess.PIPE).stdout
+    rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+    return {row["name"]: row["status"] for row in rows}
+
+
+def status():
+    states = inventory()
+    identities = []
+    for role in ROLES:
+        state = states.get(role, "absent")
+        print(f"{role}  {state}  {LAN[role]}", flush=True)
+        if state == "Running":
+            lines = guest(role, "status", stdout=subprocess.PIPE).stdout.splitlines()
+            machine, boot = lines[:2]
+            identities.append((machine, boot))
+            print(f"  machine-id={machine}  boot-id={boot}")
+            print("  " + "\n  ".join(lines[2:]))
+    if len(identities) == 2 and any(len(set(ids)) < 2 for ids in zip(*identities)):
+        raise ValueError("Duplicate guest identity")
+
+
+def endpoint(role, args):
+    # Enter the test network as root, then return to the caller's guest UID.
+    wrapper = 'exec sudo ip netns exec pt-app runuser -u "$(id -un)" -- "$@"'
+    os.execvpe("limactl", shell(role, "sh", "-c", wrapper, "lab-exec", *(args or ["bash", "-l"])), ENV)
+
+
+def build():
+    states = inventory()
+    if any(states.get(role) != "Running" for role in ROLES):
+        raise RuntimeError("Run lab/ctl up before installing the Linux binaries")
+    artifacts = {
+        "peertty": ("./cmd/peertty", "/usr/local/bin/peertty"),
+        "stun-only-server": ("github.com/pion/turn/v5/examples/stun-only-server",
+                             "/usr/local/lib/peertty-lab/stun-only-server"),
+    }
+    build_env = dict(ENV, GOOS="linux", GOARCH="arm64", CGO_ENABLED="0")
+    tools = LIMA / "_tools"
+    go = shutil.which("go") or str(tools / "go/bin/go")
+    if not Path(go).is_file():
+        raise RuntimeError("Rebuilding requires Go 1.25+ on PATH")
+    build_env.setdefault("GOMODCACHE", str(tools / "modules"))
+    build_env.setdefault("GOCACHE", str(tools / "build-cache"))
+    for name, (package, _) in artifacts.items():
+        subprocess.run([go, "build", "-mod=readonly", "-trimpath", "-o",
+                        str(LIMA / f"{name}-linux-arm64"), package],
+                       cwd=LAB.parent, env=build_env, check=True)
+    # Transfer both complete builds before installing either one.
+    for role in ROLES:
+        for name in artifacts:
+            run(["limactl", "copy", "--backend=scp", str(LIMA / f"{name}-linux-arm64"),
+                 f"{role}:/tmp/peertty-build-{name}"])
+    for role in ROLES:
+        for name, (_, target) in artifacts.items():
+            run(shell(role, "sudo", "install", "-C", "-D", "-m", "0755", f"/tmp/peertty-build-{name}", target))
+        guest(role, "stun")
+
+
+def probe_direction(source, target, mode, code):
+    # In NAT mode the peer gateway reports the translated source it observed.
+    namespace = "pt-app" if mode == "routed" else "pt-svc"
+    dest = LAN[target] if mode == "routed" else OBSERVER[target]
+    token = secrets.token_hex(8)
+    receive = shell(target, "sudo", "ip", "netns", "exec", namespace,
+                    "python3", "-u", "-c", code, "receive", dest, token)
+    with subprocess.Popen(receive, env=ENV, text=True, stdout=subprocess.PIPE) as listener:
+        try:
+            if not select.select([listener.stdout], [], [], 12)[0]:
+                raise TimeoutError(f"{target}: UDP receiver startup timed out")
+            ready = listener.stdout.readline().split()
+            if len(ready) != 2 or ready[0] != "READY":
+                raise RuntimeError(f"{target}: UDP receiver failed to bind")
+            send = shell(source, "sudo", "ip", "netns", "exec", "pt-app",
+                         "python3", "-c", code, "send", dest, token, ready[1])
+            run(send, timeout=10)
+            result, _ = listener.communicate(timeout=12)
+            if listener.returncode:
+                raise RuntimeError(f"{target}: UDP receiver exited {listener.returncode}")
+            return json.loads(result)
+        finally:
+            if listener.poll() is None:
+                listener.kill()
+
+
+def probe():
+    profile, mode = active_profile()
+    print(f"{profile} ({mode})   " + ("target: peer endpoint" if mode == "routed" else "target: remote WAN observer"), flush=True)
+    code = (LAB / "udp-probe.py").read_text()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as threads:
+        jobs = [(a, b, threads.submit(probe_direction, a, b, mode, code))
+                for a, b in zip(ROLES, reversed(ROLES))]
+        for a, b, job in jobs:
+            r = job.result()
+            print(f"{a} -> {b}: {r['received']}/{r['sent']} UDP, "
+                  f"duplicates={r['duplicates']}, reordered={r['reordered']}, "
+                  f"source={','.join(r['sources']) or '-'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    cmd = parser.add_subparsers(dest="action", required=True)
+    for name in ("up", "status", "stop", "probe", "build", "ssh-check"):
+        cmd.add_parser(name)
+    menu = cmd.add_parser("menu-check")
+    menu.add_argument("--binary", help="test this Linux ARM64 binary in guest temporary directories")
+    menu.add_argument("--closed-ssh", action="store_true", help="reverse the guests and test automatic activation on a closed port 22")
+    ending = menu.add_mutually_exclusive_group()
+    ending.add_argument("--revoke", dest="ending", action="store_const", const="revoke",
+                        help="revoke the grant on the target while two SSH windows are open")
+    ending.add_argument("--expire", dest="ending", action="store_const", const="expire",
+                        help="keep both SSH windows open until the signed test grant expires")
+    menu.set_defaults(ending="exit")
+    menu.add_argument("--check-sudo", action="store_true", help="compare a read-only UID check over SSH with the target account's existing sudo policy")
+    punch = cmd.add_parser("punch-check", help="test private endpoints across clean, lossy and UDP-blocked NATs")
+    punch.add_argument("--binary", required=True, help="current Linux ARM64 binary")
+    profile = cmd.add_parser("profile")
+    profile.add_argument("name", choices=PROFILES)
+    edge = profile.add_mutually_exclusive_group()
+    edge.add_argument("--nat", dest="mode", action="store_const", const="nat", help="stateful NAT on each edge")
+    edge.add_argument("--remap-ports", dest="mode", action="store_const", const="nat-remap", help="translate both IP and UDP port")
+    edge.add_argument("--dependent-ports", dest="mode", action="store_const", const="nat-dependent", help="map STUN and peer traffic to disjoint port ranges")
+    profile.set_defaults(mode="routed")
+    execute = cmd.add_parser("exec")
+    execute.add_argument("role", choices=ROLES)
+    execute.add_argument("argv", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if args.action == "exec":
+        # Applications may stay running while the operator changes the network.
+        return endpoint(args.role, args.argv)
+    with (LAB / ".control.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH if args.action in ("status", "probe", "ssh-check", "menu-check") else fcntl.LOCK_EX)
+        if args.action == "up":
+            up()
+        elif args.action == "profile":
+            set_profile(args.name, args.mode)
+        elif args.action == "status":
+            status()
+        elif args.action == "probe":
+            probe()
+        elif args.action == "build":
+            build()
+        elif args.action == "ssh-check":
+            run([sys.executable, str(LAB / "ssh_check.py"), active_profile()[1]])
+        elif args.action == "menu-check":
+            binary = str(Path(args.binary).resolve(strict=True)) if args.binary else ""
+            run([sys.executable, "-B", str(LAB / "menu_check.py"), active_profile()[1], binary,
+                 "closed" if args.closed_ssh else "existing", args.ending, "0", "single", "open",
+                 *(["--check-sudo"] if args.check_sudo else [])])
+        elif args.action == "punch-check":
+            binary = str(Path(args.binary).resolve(strict=True))
+            original = active_profile()
+            cases = [
+                ("clean", "nat", "existing", "exit", "40", "fallback", "open"),
+                ("clean", "nat-remap", "existing", "exit", "0", "single", "open"),
+                ("extreme", "nat", "existing", "exit", "0", "single", "open"),
+                ("extreme", "nat", "closed", "revoke", "0", "single", "open"),
+                ("clean", "nat-dependent", "closed", "exit", "0", "single", "incompatible"),
+                ("udp-blocked", "nat", "closed", "exit", "0", "single", "blocked"),
+            ]
+            failed = []
+            try:
+                for profile, mode, *options in cases:
+                    set_profile(profile, mode)
+                    print("test", profile, mode, *options, flush=True)
+                    try:
+                        run([sys.executable, "-B", str(LAB / "menu_check.py"), mode, binary, *options])
+                    except subprocess.CalledProcessError:
+                        failed.append(" ".join([profile, mode, *options]))
+            finally:
+                set_profile(*original)
+                active_profile()
+            if failed:
+                raise RuntimeError("failed cases: " + ", ".join(failed))
+        elif args.action == "stop":
+            states = inventory()
+            for role in ROLES:
+                if states.get(role) not in (None, "Stopped"):
+                    run(["limactl", "stop", role])
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"lab: {exc}", file=sys.stderr)
+        sys.exit(1)

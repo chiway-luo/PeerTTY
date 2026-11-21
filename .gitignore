@@ -1,0 +1,9 @@
+.DS_Store
+/AGENTS.md
+/MEMORY.md
+/dist/
+/peertty
+/peertty.exe
+*.key
+*.offer
+*.answer

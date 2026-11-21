@@ -1,0 +1,57 @@
+# macOS 使用手册
+
+## 安装和启动
+
+Apple 芯片和 Intel 共用一个安装包。双击安装并按 macOS 提示授权，完成后打开“终端”。0.3.1 安装包尚无 Apple 开发者签名和公证。[PeerTTY-macOS.pkg](../dist/installers/0.3.1/PeerTTY-macOS.pkg)
+
+```sh
+peertty
+```
+
+首次启动会创建 `~/Library/Application Support/PeerTTY/device.key`。设备身份会随邀请或回执发送，私钥保存在本机。输入 `0` 退出。
+
+仅给当前用户安装时，将 [用户安装脚本](../dist/installers/0.3.1/install-macos-user.sh) 与同一版本的 `.pkg` 放在一起，在该目录运行 `sh install-macos-user.sh`。程序会安装到 `~/.local/bin/peertty`。如果终端提示找不到命令，可直接运行 `"$HOME/.local/bin/peertty"`。要在每个新终端输入短命令，使用默认 zsh 的用户可将 `export PATH="$HOME/.local/bin:$PATH"` 加入自己的 `~/.zprofile`，然后重新打开终端。
+
+## 在 Mac 上控制另一台设备
+
+1. 两端安装 0.3.1，请对方选 `2` 并把邀请私发给你。按 **⌘V，再按回车**，也可以输入 `/paste` 从 Mac 剪贴板读取邀请。收到文件时选 `1` 并输入文件路径。
+2. 回车采用邀请中的账号，把回执发回同一私聊。如果屏幕提示“回车使用本次授权登录”，对方核对设备并输入 `y` 后即可直接登录。要使用已有 SSH 凭据，可在账号栏输入 `/ssh`。
+3. 在新窗口运行 `peertty link`，可以同时打开多个终端。输入 `exit` 关闭当前窗口。脚本可执行 `peertty link -- hostname`。
+
+## 让对方控制这台 Mac
+
+1. 选 `2 允许被控制`。已有本机 SSH 服务时直接进入配对。22 关闭时，程序检查临时服务配置。如果当前用户版没有绑定 22 的权限，选 `1`，在文件选择框选本版 `PeerTTY-macOS.pkg`，完成系统安装后关闭安装器。后续需要验证管理员权限或生成缺失的主机密钥时，菜单会显示对应操作。
+2. 选择 **1–24 小时**，直接回车为 1 小时。把邀请通过私聊发给对方。邀请会尝试自动复制，也可输入 `c` 复制或 `v` 显示。
+3. 粘贴回执或输入 `p`，核对请求控制的设备和账号，再输入 `y`。对方可在有效期内打开多个 SSH 终端。
+4. 关闭菜单后授权继续计时。重新运行 `peertty` 可看到状态与终端数，`/host` 回到被控面板。面板中按 `q`，或在任意终端运行 `peertty revoke`，可撤销并断开全部窗口。
+
+如果选择系统 SSH 登录，账号须具有本机“远程登录”权限。[Apple 远程登录说明](https://support.apple.com/guide/mac-help/allow-a-remote-computer-to-access-your-mac-mchlp1066/mac)
+
+控制方使用这台 Mac 批准的账号登录。在已连接的终端输入 `sudo -l` 可查看权限，sudo 要求验证时在该窗口输入密码。[从单条命令调用 sudo](../README.md#用普通账号运行管理员命令)
+
+## 两边都在路由器后面
+
+两端各选 `4 网络自检`。“STUN 映射”大于 0 表示本机发现了 UDP 出口映射。若为 0，在主菜单 `3 连接设置` 更换可达的 STUN 后再选 `4`。实际连接路径在批准回执后显示。[双 NAT 常见提示](../README.md#两端都在私网时)
+
+## 升级和卸载
+
+先用 `peertty revoke` 结束活动授权并退出菜单，按首次使用的安装方式升级或卸载。升级后用 `peertty --version` 核对版本。设备密钥独立保存在用户目录，重装后可沿用原指纹。
+
+| 命令位置 | 升级 | 卸载 |
+| --- | --- | --- |
+| `/usr/local/bin/peertty` | 双击新版 `.pkg` | 删除系统命令入口和程序，然后移除两份安装收据，见下方命令。 |
+| `~/.local/bin/peertty` | 在新版安装包目录运行 `sh install-macos-user.sh` | 运行 `rm "$HOME/.local/bin/peertty"` |
+
+<details>
+<summary>卸载系统安装版</summary>
+
+```sh
+sudo rm /usr/local/bin/peertty /Library/PeerTTY/peertty
+sudo rmdir /Library/PeerTTY
+sudo pkgutil --forget io.peertty.cli
+sudo pkgutil --forget io.peertty.core
+```
+
+如果曾在当前用户版的菜单里加装系统版，完整卸载时按表中两行分别移除。设备身份保存在用户目录。
+
+</details>

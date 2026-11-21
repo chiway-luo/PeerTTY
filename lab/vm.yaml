@@ -1,0 +1,22 @@
+minimumLimaVersion: 2.0.0
+base:
+  - template:_images/ubuntu-22.04
+vmType: vz
+cpus: 1
+memory: 1GiB
+disk: 8GiB
+mounts: []
+containerd:
+  system: false
+  user: false
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+propagateProxyEnv: false
+networks:
+  - lima: user-v2
+portForwards:
+  - guestIP: 0.0.0.0
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
