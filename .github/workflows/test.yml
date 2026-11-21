@@ -19,3 +19,37 @@ jobs:
       - if: runner.os == 'Linux'
         run: go test -race ./...
       - run: go build -trimpath ./cmd/peertty
+      - if: runner.os == 'macOS'
+        name: Measure unit test coverage
+        run: |
+          go test -short -count=1 -coverpkg=peertty/... -coverprofile=coverage.out ./...
+          python3 scripts/coverage_badge.py coverage.out
+      - if: runner.os == 'macOS' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badge
+          path: assets/coverage.svg
+          if-no-files-found: error
+
+  publish-coverage:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-badge
+          path: assets
+      - name: Update the badge for the tested commit
+        run: |
+          if git diff --quiet -- assets/coverage.svg; then exit 0; fi
+          git fetch origin main
+          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- assets/coverage.svg
+          git commit -m "Update Go coverage badge"
+          git push origin HEAD:main

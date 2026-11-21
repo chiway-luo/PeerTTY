@@ -15,8 +15,87 @@ import (
 )
 
 func TestLocalClientsShareOnlyApprovedPeer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises an active host and controller over local sockets")
+	}
 	t.Run("revoke", func(t *testing.T) { exerciseSharedPeer(t, time.Minute) })
 	t.Run("expiry", func(t *testing.T) { exerciseSharedPeer(t, 5*time.Second) })
+}
+
+func TestRevokePendingHostRemovesInvitationAndReleasesIdentity(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	key := filepath.Join(t.TempDir(), "device.key")
+	if _, err := grant.NewIdentity(key); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	var bootstrap bytes.Buffer
+	if err := send(&bootstrap, Options{Role: "host", Key: key, Port: 2222, TTL: time.Minute, STUN: "none"}); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	ready, announce := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := Serve(ctx, &bootstrap, announce)
+		announce.CloseWithError(err)
+		done <- err
+	}()
+	t.Cleanup(func() {
+		cancel()
+		ready.Close()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("pending worker did not exit")
+		}
+	})
+	var started reply
+	if err := receive(ready, &started); err != nil {
+		t.Fatal(err)
+	}
+	var st State
+	for {
+		var err error
+		st, err = Status(ctx, key)
+		if err != nil || st.ID != started.State.ID {
+			t.Fatalf("unexpected worker: %v", err)
+		}
+		if st.Phase == "waiting" {
+			break
+		}
+		if st.Phase != "gathering" || ctx.Err() != nil {
+			t.Fatalf("pending host: %s %s", st.Phase, st.Note)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ticket, err := grant.Read(st.Exchange)
+	if err != nil || !ticket.Reusable() || st.Terminals != 0 {
+		t.Fatal("pending host published an invalid invitation", err)
+	}
+	if lease, err := grant.LeaseIdentity(key); !errors.Is(err, grant.ErrInUse) {
+		if lease != nil {
+			lease.Close()
+		}
+		t.Fatalf("pending grant failed to hold the identity: %v", err)
+	}
+	if err := Revoke(ctx, key, st.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(st.Exchange); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("revoked invitation remains: %v", err)
+	}
+	if _, err := Status(ctx, key); !errors.Is(err, ErrInactive) {
+		t.Fatal("revoked grant remains active", err)
+	}
+	lease, err := grant.LeaseIdentity(key)
+	if err != nil {
+		t.Fatal("revocation retained identity", err)
+	}
+	lease.Close()
 }
 
 func exerciseSharedPeer(t *testing.T, ttl time.Duration) {

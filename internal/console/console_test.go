@@ -134,6 +134,9 @@ func (l *transcript) wait(t *testing.T, s string) string {
 }
 
 func TestExpiredHostReturnsToSameMenu(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a detached host and waits for its grant to expire")
+	}
 	in, keys, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

@@ -2,7 +2,7 @@
 
 ## 安装和启动
 
-在“设置 → 系统 → 系统信息”查看系统类型，双击对应的 MSI 安装包。安装位置为当前用户的 `%LOCALAPPDATA%\Programs\PeerTTY`。0.3.1 的 MSI 尚无发行者签名。[x64 安装包](../dist/installers/0.3.1/PeerTTY-Windows-x64.msi) · [ARM64 安装包](../dist/installers/0.3.1/PeerTTY-Windows-ARM64.msi)
+在“设置 → 系统 → 系统信息”查看系统类型，双击对应的 MSI 安装包。安装位置为当前用户的 `%LOCALAPPDATA%\Programs\PeerTTY`。0.3.1 的 MSI 尚无发行者签名。x64 使用 `PeerTTY-Windows-x64.msi`，ARM64 使用 `PeerTTY-Windows-ARM64.msi`。[获取安装包](install.md#获取安装包)
 
 在开始菜单搜索 **PeerTTY** 即可打开终端菜单。也可以关闭已有的 Windows Terminal 和 PowerShell 窗口，重新打开后输入以下命令。
 
@@ -28,11 +28,11 @@ peertty
 
 普通本地账号能否使用本次公钥登录，取决于本机 Windows OpenSSH 的有效配置。管理员窗口、域账号或集中管理公钥的策略使用已有 SSH 凭据。[Windows OpenSSH 账号配置](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)
 
-Windows 被控端按 Windows 账号和 UAC 策略处理管理员操作。用 Windows 控制 Linux 或 macOS 时，可以从 PowerShell 运行 `peertty link -t -- sudo -l` 查看远端账号允许的命令。如果目标机提示验证，就在这个终端输入密码。[交互终端和 Agent 的用法](../README.md#用普通账号运行管理员命令)
+Windows 被控端按 Windows 账号和 UAC 策略处理管理员操作。用 Windows 控制 Linux 或 macOS 时，可以从 PowerShell 运行 `peertty link -t -- sudo -l` 查看远端账号允许的命令。如果目标机提示验证，就在这个终端输入密码。[交互终端和 Agent 的用法](usage.md#用普通账号运行管理员命令)
 
 ## 两端都在私网时
 
-两端各选 `4 网络自检`。如映射为 0，可在主菜单 `3 连接设置` 更换当前网络可达的 STUN 地址，再选 `4`。双方批准配对后可看到实际连接路径。[双 NAT 常见提示](../README.md#两端都在私网时)
+两端各选 `4 网络自检`。如映射为 0，可在主菜单 `3 连接设置` 更换当前网络可达的 STUN 地址，再选 `4`。双方批准配对后可看到实际连接路径。[双 NAT 常见提示](usage.md#两端都在私网时)
 
 ## 升级和卸载
 

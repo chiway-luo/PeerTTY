@@ -1,14 +1,74 @@
 package grant
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTicketSizeBoundaryAndNoPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invite")
+	payload := append([]byte("{}"), bytes.Repeat([]byte{' '}, MaxTicketSize-2)...)
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(path); err != nil {
+		t.Fatalf("at the limit: %v", err)
+	}
+	payload = append(payload, ' ')
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(path); err == nil {
+		t.Fatal("oversized file accepted")
+	}
+	if _, err := Parse(payload); err == nil {
+		t.Fatal("oversized pasted ticket accepted")
+	}
+	if _, err := Parse([]byte("{")); err == nil {
+		t.Fatal("truncated JSON accepted")
+	}
+	out := filepath.Join(dir, "output")
+	ticket := Ticket{Claims: Claims{SDP: strings.Repeat("x", MaxTicketSize)}}
+	if err := ticket.WriteNew(out); err == nil {
+		t.Fatal("oversized offer written")
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial output: %v", err)
+	}
+}
+
+func TestIdentityFileRejectsMalformedInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key")
+	if _, err := NewIdentity(path); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range [][]byte{
+		append(valid, []byte("trailing data")...),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("invalid DER")}),
+		[]byte("invalid PEM"),
+		bytes.Repeat([]byte("x"), 4097),
+	} {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadIdentity(path); err == nil {
+			t.Fatal("invalid private key accepted")
+		}
+	}
+}
 
 func TestIdentityLeaseAndRelease(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "device.key")

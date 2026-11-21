@@ -120,6 +120,9 @@ func startPair(t *testing.T, ttl time.Duration) active {
 }
 
 func TestOperatorDisconnectReleasesSSH(t *testing.T) {
+	if testing.Short() {
+		t.Skip("connects both peers to exercise a complete session")
+	}
 	s := startPair(t, time.Minute)
 	s.stopClient()
 	s.backend.SetReadDeadline(time.Now().Add(9 * time.Second))
@@ -131,6 +134,9 @@ func TestOperatorDisconnectReleasesSSH(t *testing.T) {
 }
 
 func TestDirectSessionHalfClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("connects both peers to exercise a complete session")
+	}
 	s := startPair(t, 25*time.Second)
 	payload := bytes.Repeat([]byte("SSH\x00\xff\r\n"), 90_000)
 	reply := append([]byte("received\n"), payload...)
@@ -170,6 +176,9 @@ func TestDirectSessionHalfClose(t *testing.T) {
 }
 
 func TestActiveGrantExpires(t *testing.T) {
+	if testing.Short() {
+		t.Skip("connects both peers to exercise a complete session")
+	}
 	s := startPair(t, 2*time.Second)
 	s.backend.SetReadDeadline(time.Now().Add(6 * time.Second))
 	if _, err := s.backend.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {

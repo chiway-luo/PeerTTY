@@ -32,7 +32,7 @@ go test -race ./...
 ./lab/ctl punch-check --binary dist/peertty-linux-arm64
 ```
 
-[双靶机流程](../lab/README.md) · [授权与到期用例](../internal/active/worker_test.go) · [原生命令用例](../cmd/peertty/proxy_test.go) · [安装包与清单](../dist/installers/0.3.0/)
+[双靶机流程](../lab/README.md) · [授权与到期用例](../internal/active/worker_test.go) · [原生命令用例](../cmd/peertty/proxy_test.go) · 安装包与清单 `dist/installers/0.3.0/`
 
 ## 0.3.1 普通账号与 sudo
 
@@ -50,7 +50,7 @@ go test -race ./...
 ./lab/ctl menu-check --revoke --check-sudo --binary dist/peertty-linux-arm64
 ```
 
-[0.3.1 安装包与清单](../dist/installers/0.3.1/) · [双端权限用例](../lab/menu_check.py)
+0.3.1 安装包与清单 `dist/installers/0.3.1/` · [双端权限用例](../lab/menu_check.py)
 
 ## 0.3.1 双终端撤销与自然到期
 

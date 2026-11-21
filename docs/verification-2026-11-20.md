@@ -87,7 +87,7 @@ macOS arm64 上运行了原生菜单、自检、设备指纹核验及本机 Open
 
 ## 安装包与终端启动
 
-交付版本为 0.1.0。升级测试使用单独构建的 0.1.1，仅存放在测试目录。七个安装包和 macOS 用户安装脚本均通过 SHA-256 清单校验。[发布清单](../dist/installers/0.1.0/SHA256SUMS)
+交付版本为 0.1.0。升级测试使用单独构建的 0.1.1，仅存放在测试目录。七个安装包和 macOS 用户安装脚本均通过 SHA-256 清单校验。发布清单 `dist/installers/0.1.0/SHA256SUMS`
 
 | 对象 | 本轮结果 |
 | --- | --- |
@@ -112,7 +112,7 @@ macOS arm64 上运行了原生菜单、自检、设备指纹核验及本机 Open
 | 当前 Mac 的用户版 | 本机普通进程绑定回环 22 返回权限不足。`peertty` 已更新为 0.1.1，菜单 `2` 和 `5` 均给出系统安装选项，选 `0` 正常返回。系统安装器已识别命令入口和程序两个组件。系统级安装、密码授权和 macOS 临时 SSH 登录仍待本机管理员实际操作。 |
 | Windows | x64、ARM64 已构建。组件安装、UAC 重开菜单与临时 SSH 登录尚待原生 Windows 验证。 |
 
-Linux 集成可用 `./lab/ctl menu-check --binary dist/peertty-linux-arm64` 及同一命令追加 `--closed-ssh --revoke` 复现。三端 0.1.1 安装包已通过清单校验。[发布清单](../dist/installers/0.1.1/SHA256SUMS)
+Linux 集成可用 `./lab/ctl menu-check --binary dist/peertty-linux-arm64` 及同一命令追加 `--closed-ssh --revoke` 复现。三端 0.1.1 安装包已通过清单校验。发布清单 `dist/installers/0.1.1/SHA256SUMS`
 
 ## 0.2.0 两段配对与 Mac 粘贴
 
@@ -124,4 +124,4 @@ Linux 集成可用 `./lab/ctl menu-check --binary dist/peertty-linux-arm64` 及�
 | Linux 同一身份打开两个菜单 | 在 0.2.0 的第一个窗口生成邀请后，第二个窗口连续两次选 `2` 并输入 `60`，均提示已有授权。两次尝试后磁盘上只有第一个窗口的邀请。在第一个窗口输入 `q` 后原文件被回收，第二个窗口随即签发了新邀请。 |
 | 校验与安装包 | 修改签名字段、更换签发人、跨邀请或跨版本回放、过期回执均被拒绝。旧版定向邀请继续检查接收设备。三端安装包均通过清单校验。Windows 两种 MSI 已解包，程序与对应架构的发布程序一致，原生 Windows 交互尚待验证。 |
 
-[终端回归用例](../internal/console/console_test.go) · [签名与回执绑定测试](../internal/grant/grant_test.go) · [双靶机复现](../lab/README.md#单独检查链路和终端) · [0.2.0 安装包清单](../dist/installers/0.2.0/SHA256SUMS)
+[终端回归用例](../internal/console/console_test.go) · [签名与回执绑定测试](../internal/grant/grant_test.go) · [双靶机复现](../lab/README.md#单独检查链路和终端) · 0.2.0 安装包清单 `dist/installers/0.2.0/SHA256SUMS`

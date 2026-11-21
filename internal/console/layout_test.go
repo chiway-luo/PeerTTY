@@ -10,8 +10,27 @@ import (
 	"peertty/internal/active"
 )
 
+func TestMenuColorsMatchTerminalCapabilities(t *testing.T) {
+	for _, tc := range []struct{ term, colors, fill string }{
+		{"xterm", "", "1;30;106"}, {"xterm-256color", "", "1;38;5;16;48;5;86"},
+		{"xterm-256color", "truecolor", "1;38;2;15;15;16;48;2;92;243;198"},
+	} {
+		t.Setenv("TERM", tc.term)
+		t.Setenv("COLORTERM", tc.colors)
+		t.Setenv("NO_COLOR", "")
+		c := Console{fullScreen: true}
+		if got := c.view().key("1"); !strings.Contains(got, "\x1b["+tc.fill+"m") || ansi.Strip(got) != " 1 " {
+			t.Fatalf("%s/%s: %q", tc.term, tc.colors, got)
+		}
+		t.Setenv("NO_COLOR", "1")
+		if got := c.view().key("1"); got != "[1]" {
+			t.Fatalf("monochrome key: %q", got)
+		}
+	}
+}
+
 func TestMenuFitsTerminal(t *testing.T) {
-	for _, size := range [][2]int{{36, 12}, {40, 20}, {52, 14}, {60, 21}, {84, 21}, {120, 36}} {
+	for _, size := range [][2]int{{36, 12}, {38, 18}, {40, 20}, {52, 14}, {60, 21}, {71, 18}, {84, 21}, {120, 36}} {
 		for _, color := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%dx%d/color=%t", size[0], size[1], color), func(t *testing.T) {
 				v := newTerminalView(size[0], size[1], color)
@@ -35,8 +54,14 @@ func TestMenuFitsTerminal(t *testing.T) {
 					}
 					return visible
 				}
-				home := check("home", v.home("0.3.1+ui.2", 2222, active.State{}, active.ErrInactive)+v.commandPrompt(true, false))
-				for _, word := range []string{"待配对", "/connect", "/host", "❯"} {
+				home := check("home", v.home("0.3.1+test", 2222, active.State{}, active.ErrInactive)+v.commandPrompt(true, false))
+				words := []string{"点对点远程终端", "待配对", "/connect", "/host", "v0.3.1+test"}
+				if v.width >= 35 && v.height >= 18 {
+					words = append(words, "┏━━━━━┓", "┃  ━━ ┃", "┗━━━┛", "2222")
+				} else {
+					words = append(words, "❯_ PeerTTY")
+				}
+				for _, word := range words {
 					if !strings.Contains(home, word) {
 						t.Errorf("home missing %q", word)
 					}
@@ -47,6 +72,9 @@ func TestMenuFitsTerminal(t *testing.T) {
 					}
 				}
 				help := check("help", v.heading("全部操作")+v.help()+v.commandPrompt(false, false))
+				if !strings.Contains(help, "❯_ PeerTTY") {
+					t.Error("help missing compact brand")
+				}
 				for _, group := range helpGroups {
 					for _, a := range group.actions {
 						cmd, _ := menuCommand(a.key)

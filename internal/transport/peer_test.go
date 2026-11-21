@@ -65,6 +65,9 @@ func TestOnlyDirectCandidates(t *testing.T) {
 }
 
 func TestSTUNPublishesMappedCandidate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises UDP discovery and refresh with a local server")
+	}
 	t.Parallel()
 	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -137,6 +140,9 @@ func TestSTUNPublishesMappedCandidate(t *testing.T) {
 }
 
 func TestRefreshUsesGatheringPortForRemoteFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exercises UDP discovery and refresh with a local server")
+	}
 	t.Parallel()
 	listen := func() *net.UDPConn {
 		t.Helper()

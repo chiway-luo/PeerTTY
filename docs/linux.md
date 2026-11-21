@@ -10,19 +10,19 @@ peertty
 
 输入 `1` 控制设备，`2` 允许被控制，`5` 单独检查本机被控条件，`0` 退出。首次启动会在 `${XDG_CONFIG_HOME:-$HOME/.config}/PeerTTY/device.key` 保存本机设备私钥。
 
-首次安装可在软件管理器中打开对应的安装包。
+取得安装包后，用系统软件管理器打开对应文件。[获取安装包](install.md#获取安装包)
 
 | 系统 | 安装包 |
 | --- | --- |
-| Debian / Ubuntu | [amd64](../dist/installers/0.3.1/peertty_amd64.deb) · [arm64](../dist/installers/0.3.1/peertty_arm64.deb) |
-| Fedora / RHEL | [x86_64](../dist/installers/0.3.1/peertty.x86_64.rpm) · [aarch64](../dist/installers/0.3.1/peertty.aarch64.rpm) |
+| Debian / Ubuntu | `peertty_amd64.deb` · `peertty_arm64.deb` |
+| Fedora / RHEL | `peertty.x86_64.rpm` · `peertty.aarch64.rpm` |
 
 <details>
 <summary>无桌面的服务器或其他发行版如何安装</summary>
 
 在下载目录安装。Debian / Ubuntu 使用 `sudo apt install "./peertty_$(dpkg --print-architecture).deb"`，Fedora / RHEL 使用 `sudo dnf install "./peertty.$(uname -m).rpm"`。
 
-其他 64 位发行版可取单文件程序。x86-64 运行 `sudo install -m 0755 peertty-linux-amd64 /usr/local/bin/peertty`，ARM64 将文件名改为 `peertty-linux-arm64`。[x86-64 程序](../dist/peertty-linux-amd64) · [ARM64 程序](../dist/peertty-linux-arm64)
+其他 64 位发行版可取单文件程序。x86-64 运行 `sudo install -m 0755 peertty-linux-amd64 /usr/local/bin/peertty`，ARM64 将文件名改为 `peertty-linux-arm64`。[构建单文件程序](install.md#构建安装包)
 
 </details>
 
@@ -44,11 +44,11 @@ peertty
 
 同一设备同一时间只能占用一个角色。已有被控授权时，再选 `2` 可回到原邀请。要换控制方或切换角色，先执行 `peertty revoke`。
 
-控制方登录的是目标机批准的 Linux 账号。在连接中输入 `sudo -l` 可查看该账号获准的命令。执行命令时若 sudo 提示验证，在这个 SSH 窗口输入密码。[交互终端和 Agent 的用法](../README.md#用普通账号运行管理员命令)
+控制方登录的是目标机批准的 Linux 账号。在连接中输入 `sudo -l` 可查看该账号获准的命令。执行命令时若 sudo 提示验证，在这个 SSH 窗口输入密码。[交互终端和 Agent 的用法](usage.md#用普通账号运行管理员命令)
 
 ## 双私网诊断
 
-两端各选 `4 网络自检`。如果 STUN 映射为 0，可在主菜单 `3 连接设置` 中更换 STUN 服务，再选 `4` 复查。批准回执后可查看最终的直连路径。[双 NAT 常见提示](../README.md#两端都在私网时) · [双 Linux 靶机复现](../lab/README.md)
+两端各选 `4 网络自检`。如果 STUN 映射为 0，可在主菜单 `3 连接设置` 中更换 STUN 服务，再选 `4` 复查。批准回执后可查看最终的直连路径。[双 NAT 常见提示](usage.md#两端都在私网时) · [双 Linux 靶机复现](../lab/README.md)
 
 ## 升级和卸载
 

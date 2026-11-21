@@ -28,6 +28,9 @@ func TestMain(m *testing.M) {
 // Run explicitly inside the disposable Linux lab, as a normal local account
 // with a pre-existing loopback SSH listener. No account key file is changed.
 func TestApprovedLoginBesideExistingSSHD(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires the disposable SSH lab")
+	}
 	if os.Getenv("PEERTTY_LAB_OPEN_SSH") != "1" {
 		t.Skip("requires the lab's existing loopback sshd")
 	}

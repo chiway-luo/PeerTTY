@@ -53,7 +53,8 @@ func (v terminalView) key(text string) string {
 	if !v.color {
 		return "[" + text + "]"
 	}
-	return v.ink("7;36", " "+text+" ")
+	_, fill := brandColors()
+	return v.ink(fill, " "+text+" ")
 }
 
 func padCells(text string, width int) string {
@@ -67,7 +68,7 @@ func (v terminalView) rule(left, right string) string {
 }
 
 func (v terminalView) heading(title string) string {
-	label := v.accent("PeerTTY") + v.muted("  /  ") + v.bold(title) + "  "
+	label := v.compactMark() + " " + v.accent("PeerTTY") + v.muted("  /  ") + v.bold(title) + "  "
 	if v.height < 18 {
 		return v.rule(label, "") + "\n"
 	}
@@ -137,30 +138,40 @@ func (v terminalView) hero(version, system string, port int, status string) stri
 		brand += " " + v.muted(version)
 	}
 	title := v.bold("点对点远程终端")
-	portLabel := fmt.Sprintf("SSH 端口 %d", port)
+	portLabel := "SSH 端口 " + strconv.Itoa(port)
+	if v.width >= 35 && v.height >= 18 {
+		top := v.rule(v.muted("╭"), v.muted("╮"))
+		bottom := v.rule(v.muted("╰"), v.muted("╯"))
+		labels := [5]string{"", v.accent("PeerTTY"), title, v.muted(version), ""}
+		details := [5]string{"", status, v.muted(padCells("本机", 10)) + system, v.muted(padCells("SSH 端口", 10)) + strconv.Itoa(port), ""}
+		wide := v.width >= 66
+		if !wide {
+			top = v.rule(v.muted("╭─ ")+ansi.Truncate(brand, v.width-6, "…")+" ", v.muted("─╮"))
+			bottom = v.rule(v.muted("╰─ ")+status+" ", v.muted("─╯"))
+			labels = [5]string{"", title, system, v.muted(portLabel), ""}
+		}
+		fmt.Fprintln(&b, top)
+		for i, line := range v.brandIcon() {
+			row := padCells(line, 14) + labels[i]
+			if wide && details[i] != "" {
+				row = padCells(row, (v.width-6)*3/5) + v.muted("│  ") + details[i]
+			}
+			b.WriteString(v.panelRow(row))
+		}
+		fmt.Fprintln(&b, bottom)
+		return b.String()
+	}
+	brand = v.compactMark() + " " + brand
 	if v.width < 32 || v.height < 13 {
-		fmt.Fprintln(&b, v.margin+brand)
+		fmt.Fprintln(&b, v.margin+ansi.Truncate(brand, v.width, "…"))
 		fmt.Fprintln(&b, v.margin+title)
 		fmt.Fprintln(&b, v.margin+status)
 		return b.String()
 	}
-	if v.width >= 66 && v.height >= 18 {
-		fmt.Fprintln(&b, v.rule(v.muted("╭"), v.muted("╮")))
-		identityWidth := (v.width - 6) * 3 / 5
-		pair := func(identity, detail string) string {
-			return v.panelRow(padCells(identity, identityWidth) + v.muted("│  ") + detail)
-		}
-		b.WriteString(v.panelRow(""))
-		b.WriteString(pair(v.accent(" ▗▄▄▄▄▖   ▗▄▄▄▄▖")+"   "+v.accent("PeerTTY"), status))
-		b.WriteString(pair(v.accent(" ▐ ›_ ├───┤ ‹_ ▌")+"   "+title, v.muted(padCells("本机", 10))+system))
-		b.WriteString(pair(v.accent(" ▝▀▀▀▀▘   ▝▀▀▀▀▘")+"   "+v.muted(version), v.muted(padCells("SSH 端口", 10))+strconv.Itoa(port)))
-		b.WriteString(v.panelRow(""))
-	} else {
-		fmt.Fprintln(&b, v.rule(v.muted("╭─ ")+brand+" ", v.muted("─╮")))
-		b.WriteString(v.panelRow(title))
-		b.WriteString(v.panelRow(v.muted(system + " · " + portLabel)))
-		b.WriteString(v.panelRow(status))
-	}
+	fmt.Fprintln(&b, v.rule(v.muted("╭─ ")+ansi.Truncate(brand, v.width-6, "…")+" ", v.muted("─╮")))
+	b.WriteString(v.panelRow(title))
+	b.WriteString(v.panelRow(v.muted(system + " · " + portLabel)))
+	b.WriteString(v.panelRow(status))
 	fmt.Fprintln(&b, v.rule(v.muted("╰"), v.muted("╯")))
 	return b.String()
 }

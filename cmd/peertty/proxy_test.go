@@ -37,6 +37,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestNativeSSHProxyExit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs native SSH and a peer connection")
+	}
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		t.Skip("native OpenSSH client unavailable")
@@ -224,6 +227,9 @@ func serveMarker(l net.Listener, cfg *ssh.ServerConfig) error {
 // Exercise the installed entry points, native command mode and SSH exit status
 // using a fixed local SSH response and two independently owned grant workers.
 func TestLinkCommandStdoutAndExitCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs native SSH and a peer connection")
+	}
 	if _, err := localssh.ClientPath(); err != nil {
 		t.Skip(err)
 	}

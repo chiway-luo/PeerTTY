@@ -2,7 +2,7 @@
 
 ## 安装和启动
 
-Apple 芯片和 Intel 共用一个安装包。双击安装并按 macOS 提示授权，完成后打开“终端”。0.3.1 安装包尚无 Apple 开发者签名和公证。[PeerTTY-macOS.pkg](../dist/installers/0.3.1/PeerTTY-macOS.pkg)
+Apple 芯片和 Intel 共用一个安装包。双击 `PeerTTY-macOS.pkg` 并按 macOS 提示授权，完成后打开“终端”。0.3.1 安装包尚无 Apple 开发者签名和公证。[获取安装包](install.md#获取安装包)
 
 ```sh
 peertty
@@ -10,7 +10,7 @@ peertty
 
 首次启动会创建 `~/Library/Application Support/PeerTTY/device.key`。设备身份会随邀请或回执发送，私钥保存在本机。输入 `0` 退出。
 
-仅给当前用户安装时，将 [用户安装脚本](../dist/installers/0.3.1/install-macos-user.sh) 与同一版本的 `.pkg` 放在一起，在该目录运行 `sh install-macos-user.sh`。程序会安装到 `~/.local/bin/peertty`。如果终端提示找不到命令，可直接运行 `"$HOME/.local/bin/peertty"`。要在每个新终端输入短命令，使用默认 zsh 的用户可将 `export PATH="$HOME/.local/bin:$PATH"` 加入自己的 `~/.zprofile`，然后重新打开终端。
+仅给当前用户安装时，将 [用户安装脚本](../packaging/install-macos-user.sh) 与同一版本的 `.pkg` 放在一起，在该目录运行 `sh install-macos-user.sh`。程序会安装到 `~/.local/bin/peertty`。如果终端提示找不到命令，可直接运行 `"$HOME/.local/bin/peertty"`。要在每个新终端输入短命令，使用默认 zsh 的用户可将 `export PATH="$HOME/.local/bin:$PATH"` 加入自己的 `~/.zprofile`，然后重新打开终端。
 
 ## 在 Mac 上控制另一台设备
 
@@ -27,11 +27,11 @@ peertty
 
 如果选择系统 SSH 登录，账号须具有本机“远程登录”权限。[Apple 远程登录说明](https://support.apple.com/guide/mac-help/allow-a-remote-computer-to-access-your-mac-mchlp1066/mac)
 
-控制方使用这台 Mac 批准的账号登录。在已连接的终端输入 `sudo -l` 可查看权限，sudo 要求验证时在该窗口输入密码。[从单条命令调用 sudo](../README.md#用普通账号运行管理员命令)
+控制方使用这台 Mac 批准的账号登录。在已连接的终端输入 `sudo -l` 可查看权限，sudo 要求验证时在该窗口输入密码。[从单条命令调用 sudo](usage.md#用普通账号运行管理员命令)
 
 ## 两边都在路由器后面
 
-两端各选 `4 网络自检`。“STUN 映射”大于 0 表示本机发现了 UDP 出口映射。若为 0，在主菜单 `3 连接设置` 更换可达的 STUN 后再选 `4`。实际连接路径在批准回执后显示。[双 NAT 常见提示](../README.md#两端都在私网时)
+两端各选 `4 网络自检`。“STUN 映射”大于 0 表示本机发现了 UDP 出口映射。若为 0，在主菜单 `3 连接设置` 更换可达的 STUN 后再选 `4`。实际连接路径在批准回执后显示。[双 NAT 常见提示](usage.md#两端都在私网时)
 
 ## 升级和卸载
 

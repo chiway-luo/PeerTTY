@@ -4,6 +4,7 @@
 /dist/
 /peertty
 /peertty.exe
+/coverage.out
 *.key
 *.offer
 *.answer

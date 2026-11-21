@@ -56,6 +56,9 @@ func TestGuardFixture(t *testing.T) {
 }
 
 func TestTemporarySSHIdentifiesBeforeHandoff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a guard subprocess and checks the TCP handoff")
+	}
 	for _, banner := range []string{"SSH-2.0-OpenSSH_Test\r\n", "not-ssh\n"} {
 		t.Run(strings.TrimSpace(banner), func(t *testing.T) {
 			listener, err := net.Listen("tcp4", "127.0.0.1:0")
