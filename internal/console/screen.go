@@ -127,6 +127,9 @@ func (t *Console) drawMenu(v terminalView, page menuPage, s active.State, err er
 		return
 	}
 	printStatus(t.out, s)
+	if page == statusPage && s.Phase == "disconnected" {
+		fmt.Fprintln(t.out, "/revoke 立即结束授权")
+	}
 	if page == homePage {
 		if s.Role == "host" {
 			fmt.Fprintln(t.out, "/host 查看活动和邀请，/revoke 撤销。")

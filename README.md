@@ -2,8 +2,9 @@
   <img src="assets/peertty-icon.png" width="80" height="80" alt="">
 </p>
 <h1 align="center">PeerTTY</h1>
-<p align="center"><strong>两台设备之间的限时 SSH 直连</strong></p>
+<p align="center"><strong>双端私网的 SSH 内网穿透 · 不在同一局域网，也能尝试点对点直连</strong></p>
 <p align="center">
+  <a href="#为什么用-peertty">项目价值</a> ·
   <a href="docs/install.md">安装</a> ·
   <a href="#首次连接">首次连接</a> ·
   <a href="docs/usage.md">使用手册</a> ·
@@ -13,11 +14,20 @@
   <a href="docs/testing.md"><img src="assets/coverage.svg" alt="macOS 上测得的 Go 单元测试语句覆盖率"></a>
 </p>
 
-需要帮同事调试一台设备时，双方可以在已有的私聊里交换邀请和回执。设备主人核对控制方和登录账号、在本机批准后，PeerTTY 才建立加密直连。授权期间可以打开多个 SSH 窗口；撤销或到期会一起断开。
+你在宿舍，待调试的设备在实验室。两端不在同一个局域网，各自在路由器后面，也没有公网 IP 或入站端口可供对方直接访问。普通 SSH 连不上时，**PeerTTY 在双方明确授权后尝试建立点对点通道，再用原生 OpenSSH 登录**。直连成功时，不必在公网开放 SSH 22 端口，也不需要公网跳板机转发终端流量。
 
 <p align="center">
   <img src="assets/peertty-menu.png" width="720" alt="PeerTTY 终端主菜单：查看当前授权，选择控制设备或允许被控制">
 </p>
+
+## 为什么用 PeerTTY
+
+- **解决的是双端私网的 SSH 可达性。** 双方通过已有私聊交换签名邀请与回执。PeerTTY 用 **STUN** 发现各端的公网地址映射，用 **ICE** 检查候选路径；网络允许时，通过 **双向 UDP 打洞** 建立直连，再在通道内传输原生 SSH。STUN 不转发 SSH 流量。
+- **直连不等于开放远程访问权限。** 被控方在本机核对控制设备和登录账号后批准。一次授权支持多个 SSH 终端，到期或主动撤销会一起断开。
+
+> **网络边界：** 双端 NAT 不一定能打通，拿到 STUN 映射也不代表直连成功。如果网络封锁 UDP 或 NAT 的映射方式不兼容，连接会失败。当前没有中继回退，也不会更改防火墙或路由器配置。[排查直连失败](docs/usage.md#两端都在私网时)
+
+**实测：** 两台各自位于独立 NAT 后的 Ubuntu ARM64 虚拟机，在四种场景下直连成功，均验证了原生 SSH、交互终端和远端登录账号。不兼容的 NAT 映射与 UDP 封锁也已验证会导致连接失败。[查看双私网实测记录](docs/verification-2026-11-21.md#双私网实测)
 
 ## 首次连接
 
@@ -29,7 +39,7 @@
 
 授权有效时，在控制端另开一个窗口运行 `peertty link` 即可再开终端，无需重新配对。输入 `exit` 只关当前窗口；要结束整份授权，在任一端运行 `peertty revoke`。
 
-**网络条件：** PeerTTY 走 UDP 直连，不提供流量中继。两端都在私网时也可以尝试连接，但并非所有 NAT 或防火墙都允许打通。若配对已批准却连不上，先在两端运行 `peertty doctor`，再按[网络自检结果](docs/usage.md#两端都在私网时)排查。
+若配对已批准却连不上，先在两端运行 `peertty doctor`，再按[网络自检结果](docs/usage.md#两端都在私网时)排查。
 
 ## 深入使用
 

@@ -208,5 +208,8 @@ func (v terminalView) status(s active.State, err error) string {
 	if s.Note != "" {
 		fmt.Fprintln(&b, v.margin+s.Note)
 	}
+	if s.Phase == "disconnected" {
+		fmt.Fprintln(&b, v.margin+v.ink("36", "/revoke")+" 立即结束授权")
+	}
 	return b.String()
 }

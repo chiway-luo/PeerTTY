@@ -37,7 +37,15 @@ func IdentityPath(stateDir, key string) (string, error) {
 }
 
 var roleNames = map[string]string{"host": "被控端", "control": "控制端"}
-var phaseNames = map[string]string{"gathering": "收集地址", "waiting": "等待被控方批准", "connecting": "建立直连", "ready": "已连接", "disconnected": "等待原路径恢复", "offline": "直连已中断"}
+
+const reconnectNotice = "直连暂时中断，正在重连…"
+const reconnectRevokeHint = "如需立即结束授权，可在另一个终端运行 peertty revoke（使用相同的设备身份）。"
+
+type reconnectingGrant struct{ id string }
+
+func (reconnectingGrant) Error() string { return reconnectNotice }
+
+var phaseNames = map[string]string{"gathering": "收集地址", "waiting": "等待被控方批准", "connecting": "建立直连", "ready": "已连接", "disconnected": "正在重连", "offline": "直连已中断"}
 
 func printStatus(out io.Writer, s active.State) {
 	fmt.Fprintf(out, "%s · %s · %d 个终端 · %s 到期（剩余 %s）\n", roleNames[s.Role], phaseNames[s.Phase], s.Terminals, s.Deadline.Local().Format("01-02 15:04"), max(time.Duration(0), time.Until(s.Deadline)).Round(time.Second))
@@ -87,7 +95,7 @@ func (t *Console) waitControl(ctx context.Context, s active.State, text bool) er
 			case "connecting":
 				t.line("正在建立直连…")
 			case "disconnected":
-				t.notice("33", "!", "直连暂时中断，正在等待原路径恢复。")
+				return reconnectingGrant{id: s.ID}
 			}
 		}
 		if s.Exchange != "" && !published && s.Phase == "waiting" {
@@ -177,12 +185,90 @@ func Link(ctx context.Context, key string, in *os.File, out, diag io.Writer, com
 }
 
 func (t *Console) linkSSH(ctx context.Context, s active.State) error {
+	if s.Role == "control" && s.Phase == "disconnected" {
+		return reconnectingGrant{id: s.ID}
+	}
 	return linkSSH(ctx, t.KeyPath, s, t.in, t.out, t.out, RemoteCommand{}, func(cmd *exec.Cmd) error {
 		return t.nativeSSH(cmd.Run)
 	})
 }
 
+// Wait only on the grant explicitly selected by the caller, never a newly paired grant.
+func waitReconnect(ctx context.Context, s active.State, diag io.Writer, tick <-chan time.Time, status func(context.Context) (active.State, error)) (active.State, error) {
+	ctx, cancel := context.WithDeadline(ctx, s.Deadline)
+	defer cancel()
+	fmt.Fprintln(diag, reconnectNotice)
+	for {
+		select {
+		case <-ctx.Done():
+			return active.State{}, ctx.Err()
+		case <-tick:
+		}
+		fresh, err := status(ctx)
+		if err != nil {
+			return active.State{}, err
+		}
+		if ctx.Err() != nil {
+			return active.State{}, ctx.Err()
+		}
+		if fresh.ID != s.ID || fresh.Role != "control" {
+			return active.State{}, errors.New("本次授权已结束")
+		}
+		switch fresh.Phase {
+		case "ready":
+			fmt.Fprintln(diag, "直连已恢复。")
+			return fresh, nil
+		case "disconnected":
+			continue
+		default:
+			return active.State{}, errors.New("直连未恢复，请重新配对")
+		}
+	}
+}
+
+// Observe only; never restart a live OpenSSH process or replay its input.
+func watchSSHConnection(ctx context.Context, id string, diag io.Writer, tick <-chan time.Time, status func(context.Context) (active.State, error)) {
+	previous := "ready"
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+		}
+		s, err := status(ctx)
+		if ctx.Err() != nil || errors.Is(err, active.ErrInactive) || err == nil && s.ID != id {
+			return
+		}
+		if err != nil || s.Phase == previous {
+			continue
+		}
+		switch s.Phase {
+		case "disconnected":
+			fmt.Fprintf(diag, "\r\n%s\r\n%s\r\n", reconnectNotice, reconnectRevokeHint)
+		case "ready":
+			fmt.Fprint(diag, "\r\n直连已恢复。\r\n")
+		case "offline":
+			fmt.Fprint(diag, "\r\n直连未恢复，请重新配对。\r\n")
+			return
+		}
+		previous = s.Phase
+	}
+}
+
 func linkSSH(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, command RemoteCommand, run func(*exec.Cmd) error) (result error) {
+	status := func(ctx context.Context) (active.State, error) { return active.Status(ctx, key) }
+	if s.Role == "control" && s.Phase == "disconnected" {
+		if terminalFile(diag) {
+			fmt.Fprintln(diag, reconnectRevokeHint)
+		}
+		tick := time.NewTicker(300 * time.Millisecond)
+		defer tick.Stop()
+		var err error
+		s, err = waitReconnect(ctx, s, diag, tick.C, status)
+		if err != nil {
+			return err
+		}
+	}
 	if s.Role != "control" || s.Phase != "ready" {
 		return errors.New("本机尚无已连接的控制授权，输入 peertty status 查看状态")
 	}
@@ -202,6 +288,16 @@ func linkSSH(ctx context.Context, key string, s active.State, in *os.File, out, 
 		return err
 	}
 	defer func() { result = errors.Join(result, restore()) }()
+	if len(command.Args) == 0 && terminalFile(diag) {
+		watch, stop := context.WithCancel(ctx)
+		tick := time.NewTicker(time.Second)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			watchSSHConnection(watch, s.ID, diag, tick.C, status)
+		}()
+		defer func() { stop(); tick.Stop(); <-done }()
+	}
 	return run(cmd)
 }
 

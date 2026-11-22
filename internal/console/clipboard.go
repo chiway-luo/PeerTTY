@@ -21,8 +21,12 @@ func clipboardChoice(s string) bool {
 }
 
 func shareTicket(ctx context.Context, out io.Writer, kind string, ticket grant.Ticket, copyOn, show bool) error {
+	return shareTicketWith(ctx, out, kind, ticket, copyOn, show, copyTicket)
+}
+
+func shareTicketWith(ctx context.Context, out io.Writer, kind string, ticket grant.Ticket, copyOn, show bool, copy func(context.Context, io.Writer, grant.Ticket) (string, error)) error {
 	if copyOn {
-		status, err := copyTicket(ctx, out, ticket)
+		status, err := copy(ctx, out, ticket)
 		if err == nil {
 			fmt.Fprintln(out, kind+" · "+status)
 			if !strings.HasPrefix(status, "已复制") && kind == "回执" {
@@ -87,14 +91,20 @@ func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
 
 // A remote terminal can accept an OSC 52 copy request even on a headless host.
 // Its clipboard policy is local to the terminal, so success is not assumed.
+type clipboardLookup func(context.Context, bool) (*exec.Cmd, error)
+
 func copyTicket(parent context.Context, out io.Writer, ticket grant.Ticket) (string, error) {
+	return copyTicketWith(parent, out, ticket, clipboardCommand)
+}
+
+func copyTicketWith(parent context.Context, out io.Writer, ticket grant.Ticket, lookup clipboardLookup) (string, error) {
 	var b strings.Builder
 	if err := writeTicketText(&b, ticket); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
-	cmd, err := clipboardCommand(ctx, true)
+	cmd, err := lookup(ctx, true)
 	if err == nil {
 		cmd.Stdin = strings.NewReader(b.String())
 		if err = cmd.Run(); err == nil {
@@ -111,12 +121,16 @@ func copyTicket(parent context.Context, out io.Writer, ticket grant.Ticket) (str
 
 // Clipboard import only happens on request. Treat its contents as data.
 func ticketInput(ctx context.Context, s string) (string, error) {
+	return ticketInputWith(ctx, s, clipboardCommand)
+}
+
+func ticketInputWith(ctx context.Context, s string, lookup clipboardLookup) (string, error) {
 	if !clipboardChoice(s) {
 		return s, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd, err := clipboardCommand(ctx, false)
+	cmd, err := lookup(ctx, false)
 	if err != nil {
 		return "", fmt.Errorf("%w，请直接粘贴凭证或输入文件路径", err)
 	}

@@ -197,7 +197,79 @@ func TestWorkerAcceptsOneApprovalForTheCurrentGrant(t *testing.T) {
 	if res := callWorker(approval); res.Error == "" || len(w.approval) != 0 {
 		t.Fatal("duplicate approval accepted")
 	}
+	// A reconnecting grant must still accept a local revoke without a peer
+	// transport. The old grant ID must not be able to stop another grant.
+	w.update(func(s *State) { s.Phase = "disconnected" })
+	if res := callWorker(request{Op: "revoke", ID: "replaced"}); res.Error == "" || revoked {
+		t.Fatal("stale ID revoked the reconnecting grant")
+	}
 	if res := callWorker(request{Op: "revoke", ID: "current"}); res.Error != "" || !revoked {
 		t.Fatal("current grant not revoked", res.Error)
+	}
+	if w.enter() {
+		w.leave()
+		t.Fatal("revoking grant still admits terminal streams")
+	}
+}
+
+type readinessFailure struct {
+	path string
+	t    *testing.T
+	err  error
+}
+
+func (f readinessFailure) Write([]byte) (int, error) {
+	// Readiness is written only once the rendezvous has been published,
+	// so a failing writer exercises cleanup of an already-visible startup.
+	if _, err := os.Stat(f.path); err != nil {
+		f.t.Errorf("rendezvous was not published before readiness: %v", err)
+	}
+	return 0, f.err
+}
+
+func TestFailedReadinessRemovesRendezvousAndReleasesLease(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "identity")
+	if _, err := grant.NewIdentity(key); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{Role: "host", Key: key, Port: 22, TTL: time.Minute}
+	launch := func(out io.Writer) error {
+		t.Helper()
+		var input bytes.Buffer
+		if err := send(&input, opts); err != nil {
+			t.Fatal(err)
+		}
+		return Serve(t.Context(), &input, out)
+	}
+	lease, err := grant.LeaseIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = launch(io.Discard)
+	if closeErr := lease.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if !errors.Is(err, grant.ErrInUse) {
+		t.Fatalf("concurrent launch: %v", err)
+	}
+
+	want := errors.New("readiness receiver gone")
+	if err := launch(readinessFailure{key + ".active", t, want}); !errors.Is(err, want) {
+		t.Fatalf("startup returned %v, want readiness failure", err)
+	}
+	if _, err := Status(t.Context(), key); !errors.Is(err, ErrInactive) {
+		t.Fatalf("stale rendezvous: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".peertty-port-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("temporary rendezvous files: %v, %v", matches, err)
+	}
+	lease, err = grant.LeaseIdentity(key)
+	if err != nil {
+		t.Fatalf("startup leaked identity lease: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

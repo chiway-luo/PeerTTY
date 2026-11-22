@@ -86,7 +86,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				}
 				t.line("已连接终端 ", st.Terminals)
 			case "disconnected":
-				t.notice("33", "!", "直连暂时中断，正在等待原路径恢复。")
+				t.notice("33", "!", reconnectNotice)
 			case "offline":
 				return errors.New(st.Note)
 			}

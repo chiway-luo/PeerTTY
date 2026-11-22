@@ -46,38 +46,58 @@ func missingOpenSSH(server bool) Check {
 }
 
 func checkStopped(ctx context.Context) Check {
-	if _, err := os.Stat(sshd); errors.Is(err, os.ErrNotExist) {
+	return stoppedCheck{
+		stat:        func() error { _, err := os.Stat(sshd); return err },
+		euid:        os.Geteuid,
+		hasGuard:    func() bool { exe, _ := os.Executable(); return adminGuardPath(exe) != "" },
+		bind:        probeBind22,
+		checkConfig: checkNativeConfig,
+	}.run(ctx)
+}
+
+// Keep the decision separate from OS probes so their outcomes can be tested
+// without touching the machine's OpenSSH setup, privileges or port 22.
+type stoppedCheck struct {
+	stat, bind  func() error
+	euid        func() int
+	hasGuard    func() bool
+	checkConfig func(context.Context) (string, error)
+}
+
+func (p stoppedCheck) run(ctx context.Context) Check {
+	if err := p.stat(); errors.Is(err, os.ErrNotExist) {
 		return missingOpenSSH(true)
 	} else if err != nil {
 		return Check{Message: "无法读取本机 OpenSSH 服务端。", Detail: err.Error()}
 	}
-	if os.Geteuid() != 0 {
-		exe, _ := os.Executable()
-		if adminGuardPath(exe) == "" {
-			if err := probeBind22(); errors.Is(err, os.ErrPermission) {
-				return systemInstallRequired()
-			} else if err != nil {
-				return Check{Message: "当前无法使用本机回环 22 端口，请重新检查。", Detail: err.Error()}
-			}
+	if p.euid() != 0 && !p.hasGuard() {
+		if err := p.bind(); errors.Is(err, os.ErrPermission) {
+			return systemInstallRequired()
+		} else if err != nil {
+			return Check{Message: "当前无法使用本机回环 22 端口，请重新检查。", Detail: err.Error()}
 		}
 	}
 	probe, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
-	cmd := nativeSSHD(probe, "-t")
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	var detail diagnosticTail
-	cmd.Stdout, cmd.Stderr = &detail, &detail
-	if err := cmd.Run(); err != nil {
+	if log, err := p.checkConfig(probe); err != nil {
 		if probe.Err() != nil {
 			return Check{Message: "本机 OpenSSH 配置检查已中断或超时。"}
 		}
-		log := strings.TrimSpace(string(detail))
 		if log == "" {
 			log = err.Error()
 		}
 		return unixConfigProblem(log)
 	}
 	return temporaryReady()
+}
+
+func checkNativeConfig(ctx context.Context) (string, error) {
+	cmd := nativeSSHD(ctx, "-t")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var detail diagnosticTail
+	cmd.Stdout, cmd.Stderr = &detail, &detail
+	err := cmd.Run()
+	return strings.TrimSpace(string(detail)), err
 }
 
 // bind without listen: test this user's low-port permission without accepting a

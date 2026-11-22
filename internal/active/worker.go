@@ -397,7 +397,9 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		err = errors.New("本次授权已结束")
 	} else {
 		switch req.Op {
-		case "status", "revoke":
+		case "status":
+		case "revoke":
+			w.stopping = true
 		case "approve":
 			if s.Role != "host" || s.Phase != "waiting" || req.Answer == nil {
 				err = errors.New("本次授权无法再次批准")

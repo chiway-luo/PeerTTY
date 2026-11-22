@@ -101,6 +101,7 @@ func (t *Console) menu(ctx context.Context) error {
 	defer closeScreen()
 	defer t.finishEntry()
 	page := homePage
+	var reconnectID string
 	for ctx.Err() == nil {
 		choice, err := t.menuChoice(ctx, page)
 		if errors.Is(err, io.EOF) {
@@ -111,6 +112,8 @@ func (t *Console) menu(ctx context.Context) error {
 		}
 		page = resultPage
 		command, title := menuCommand(choice)
+		selectedReconnect := reconnectID
+		reconnectID = ""
 		t.section = title
 		switch command {
 		case "/quit":
@@ -132,7 +135,14 @@ func (t *Console) menu(ctx context.Context) error {
 		case "/status":
 			page = statusPage
 		case "/revoke":
-			err = EndGrant(ctx, t.KeyPath, t.pageOut())
+			if selectedReconnect == "" {
+				err = EndGrant(ctx, t.KeyPath, t.pageOut())
+			} else {
+				err = active.Revoke(ctx, t.KeyPath, selectedReconnect)
+				if err == nil {
+					t.line("本次授权已撤销。")
+				}
+			}
 		case "/host":
 			err = t.host(ctx)
 		case "/settings":
@@ -170,6 +180,12 @@ func (t *Console) menu(ctx context.Context) error {
 		}
 		if errors.Is(err, errNewWindow) {
 			return err
+		}
+		var reconnect reconnectingGrant
+		if errors.As(err, &reconnect) {
+			reconnectID = reconnect.id
+			page = statusPage
+			continue
 		}
 		if errors.Is(err, errBack) {
 			if t.fullScreen {
