@@ -50,6 +50,14 @@ func TestIdentityAndInactiveCommands(t *testing.T) {
 func TestSSHArgumentsMatchSessionAndCommand(t *testing.T) {
 	s := active.State{Alias: "device", User: "fixture", SSHConfig: "config with spaces", Identity: "device key"}
 	args := sshArgs("peertty", "_link-proxy", s, RemoteCommand{})
+	for _, option := range []string{"ServerAliveInterval=5", "ServerAliveCountMax=5", "ConnectTimeout=45"} {
+		if !slices.Contains(args, option) {
+			t.Fatal("missing SSH timeout", option)
+		}
+	}
+	if slices.Contains(sshArgs("peertty", "_menu-proxy", s, RemoteCommand{}), "ConnectTimeout=45") {
+		t.Fatal("short SSH handshake timeout applied to manual pairing")
+	}
 	if args[0] != "-tt" || !slices.Contains(args, s.SSHConfig) || !slices.Contains(args, s.Identity) {
 		t.Fatal(args)
 	}

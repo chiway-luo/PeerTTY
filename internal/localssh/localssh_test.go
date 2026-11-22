@@ -59,7 +59,7 @@ func TestTemporarySSHIdentifiesBeforeHandoff(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a guard subprocess and checks the TCP handoff")
 	}
-	for _, banner := range []string{"SSH-2.0-OpenSSH_Test\r\n", "not-ssh\n"} {
+	for _, banner := range []string{"SSH-2.0-OpenSSH_Test\r\n", "Welcome notice\r\nSSH-2.0-OpenSSH_Test\r\n", "not-ssh\n"} {
 		t.Run(strings.TrimSpace(banner), func(t *testing.T) {
 			listener, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
@@ -86,7 +86,7 @@ func TestTemporarySSHIdentifiesBeforeHandoff(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 			defer cancel()
 			conn, err := attach(ctx, listener.Addr().String(), child)
-			if !strings.HasPrefix(banner, "SSH-2.0-") {
+			if !strings.Contains(banner, "SSH-2.0-") {
 				if err == nil {
 					conn.Close()
 					conn.Release()
@@ -125,5 +125,55 @@ func TestManagedKeyNeedsNativeUserKeyPolicy(t *testing.T) {
 		if checkUserKeyPolicy([]byte(strings.Replace(base, change[0], change[1], 1))) == nil {
 			t.Fatal("accepted restricted policy", change)
 		}
+	}
+}
+
+func TestReadSSHBannerReplayAndToolPath(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire string
+		ok         bool
+	}{
+		{"standard", "SSH-2.0-OpenSSH_9.6\r\npayload", true},
+		{"compat", "SSH-1.99-Legacy\r\n", true},
+		{"rfc4253 preamble", "Notice: authorized only\r\nSecond line\r\nSSH-2.0-OpenSSH_9.6\r\nrest", true},
+		{"ssh1 rejected", "SSH-1.5-Old\r\n", false},
+		{"oversized", strings.Repeat("A", 9000) + "\nSSH-2.0-OpenSSH\r\n", false},
+		{"eof without banner", "hello\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			go func() {
+				c, err := ln.Accept()
+				if err == nil {
+					_, _ = io.WriteString(c, tc.wire)
+					_ = c.Close()
+				}
+			}()
+			c, err := dial(t.Context(), ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			r, err := readSSHBannerReplay(c, time.Now().Add(2*time.Second))
+			if (err == nil) != tc.ok {
+				t.Fatalf("readSSHBannerReplay(%q) err=%v, want ok=%v", tc.name, err, tc.ok)
+			}
+			if tc.ok {
+				got, err := io.ReadAll(r)
+				if err != nil || string(got) != tc.wire {
+					t.Fatalf("replayed %q, want %q (err=%v)", got, tc.wire, err)
+				}
+			}
+		})
+	}
+	if _, err := ToolPath("definitely-nonexistent-peertty-tool-xyz"); err == nil {
+		t.Fatal("ToolPath succeeded for nonexistent binary")
+	}
+	if got := cmdError(exec.Command("/bin/false"), errors.New("boom"), " detail \n"); !strings.Contains(got.Error(), "detail") {
+		t.Fatalf("cmdError = %v", got)
 	}
 }

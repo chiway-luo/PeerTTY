@@ -24,7 +24,7 @@ var (
 		actions []menuAction
 	}{
 		{"连接", []menuAction{connectAction, hostAction, {"", "/paste", "读取剪贴板邀请"}, {"", "/link", "打开 SSH 终端"}}},
-		{"授权", []menuAction{statusAction, {"", "/revoke", "撤销授权"}}},
+		{"授权", []menuAction{statusAction, {"", "/receipt", "查看控制端回执"}, {"", "/revoke", "撤销授权"}}},
 		{"本机", []menuAction{{"3", "/settings", "连接设置"}, {"4", "/doctor", "网络自检"}, {"5", "/check", "检查被控条件"}, {"", "/clipboard", "切换自动复制"}, {"0", "/quit", "关闭菜单"}}},
 	}
 )
@@ -55,11 +55,7 @@ func (v terminalView) grantIndicator(s active.State, err error) string {
 	if err != nil {
 		return v.ink("33", "! 状态不可用")
 	}
-	phase := phaseNames[s.Phase]
-	if s.Role == "host" && s.Phase == "waiting" {
-		phase = "等待回执"
-	}
-	label := phase + " · " + roleNames[s.Role]
+	label := phaseName(s) + " · " + roleNames[s.Role]
 	if s.Phase == "ready" {
 		return v.ink("32", "● "+label)
 	}
@@ -82,7 +78,10 @@ func (v terminalView) home(version string, port int, s active.State, err error) 
 		if s.Role == "host" {
 			left, leftHint = menuAction{"2", "/host", "被控面板"}, "查看活动与邀请"
 		} else {
-			left, leftHint = menuAction{"1", "/connect", "继续连接"}, "进入已授权设备的终端"
+			left, leftHint = menuAction{"1", "/connect", "继续连接"}, "/receipt 查看或复制回执"
+			if s.Phase == "waiting" {
+				leftHint = "/receipt 查看或再复制回执"
+			}
 		}
 	}
 	if v.height >= 14 {
@@ -116,7 +115,7 @@ func (v terminalView) home(version string, port int, s active.State, err error) 
 }
 
 func (v terminalView) help() string {
-	if v.height < 14 && v.width >= 27 && v.width < 66 {
+	if v.height <= 14 && v.width >= 27 && v.width < 66 {
 		// With very few rows, keep every command reachable on a single screen.
 		var entries []string
 		col := (v.width - 3) / 2
@@ -208,8 +207,14 @@ func (v terminalView) status(s active.State, err error) string {
 	if s.Note != "" {
 		fmt.Fprintln(&b, v.margin+s.Note)
 	}
+	if s.Role == "control" && s.Exchange != "" && s.Phase != "offline" {
+		fmt.Fprintln(&b, v.margin+v.ink("36", "/receipt")+" 查看或复制本次回执")
+	}
+	if s.Role == "control" && (s.Phase == "ready" || s.Phase == "disconnected") {
+		fmt.Fprintln(&b, v.margin+v.ink("36", "/link")+" 直连可用时打开 SSH 终端")
+	}
 	if s.Phase == "disconnected" {
-		fmt.Fprintln(&b, v.margin+v.ink("36", "/revoke")+" 立即结束授权")
+		fmt.Fprintln(&b, v.margin+v.ink("36", "/revoke")+" 结束授权并重新配对")
 	}
 	return b.String()
 }

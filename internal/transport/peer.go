@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pion/datachannel"
 	"github.com/pion/ice/v4"
+	"github.com/pion/stun/v4"
 	"github.com/pion/transport/v5/stdnet"
 	"github.com/pion/webrtc/v4"
 )
@@ -31,6 +34,10 @@ type Peer struct {
 	cancel      context.CancelCauseFunc
 	stopRefresh context.CancelFunc
 	signaling   *signalingNet
+	tryUPnP     bool
+	mu          sync.Mutex
+	closed      bool
+	portMap     *portMapping
 }
 
 func New(parent context.Context, spec string) (*Peer, error) {
@@ -65,13 +72,17 @@ func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) 
 	settings.DetachDataChannels()
 	settings.EnableDataChannelBlockWrite(true)
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
-	settings.SetIncludeLoopbackCandidate(true)
+	// Loopback only reaches a peer on the same machine. Keep it for offline
+	// and same-host checks, and omit it from tickets that cross a network.
+	settings.SetIncludeLoopbackCandidate(len(urls) == 0)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	exchangeWindow := 25 * time.Second
 	if deadline, ok := parent.Deadline(); ok {
 		exchangeWindow = max(exchangeWindow, time.Until(deadline))
 	}
-	settings.SetICETimeouts(12*time.Second, exchangeWindow, 2*time.Second)
+	// The failure window also covers manual signaling. Report loss on an
+	// established route separately, after three missed keepalive intervals.
+	settings.SetICETimeouts(6*time.Second, exchangeWindow, 2*time.Second)
 	settings.SetSCTPMaxMessageSize(16 * 1024)
 	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(config)
 	if err != nil {
@@ -79,7 +90,7 @@ func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) 
 		return nil, err
 	}
 	lifetime, cancel := context.WithCancelCause(parent)
-	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling}
+	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling, tryUPnP: hasRemoteSTUN(urls)}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if reusable && state == webrtc.PeerConnectionStateDisconnected {
 			return
@@ -100,6 +111,14 @@ func (p *Peer) Connected() bool          { return p.pc.ConnectionState() == webr
 func (p *Peer) Close() error {
 	p.stopRefresh()
 	p.cancel(context.Canceled)
+	p.mu.Lock()
+	p.closed = true
+	pm := p.portMap
+	p.portMap = nil
+	p.mu.Unlock()
+	if pm != nil {
+		pm.Close()
+	}
 	return p.pc.Close()
 }
 
@@ -183,7 +202,31 @@ func (p *Peer) OpenLink(ctx context.Context) (datachannel.ReadWriteCloserDeadlin
 	}
 }
 
+func hasRemoteSTUN(urls []string) bool {
+	for _, raw := range urls {
+		uri, err := stun.ParseURI(raw)
+		if err != nil {
+			continue
+		}
+		if ip, err := netip.ParseAddr(uri.Host); err == nil {
+			if !ip.IsLoopback() {
+				return true
+			}
+			continue
+		}
+		if !strings.EqualFold(uri.Host, "localhost") {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Peer) gather(ctx context.Context, desc webrtc.SessionDescription) (string, error) {
+	var gwCh chan *upnpGateway
+	if p.tryUPnP {
+		gwCh = make(chan *upnpGateway, 1)
+		go func() { gwCh <- discoverUPnPGateway(ctx) }()
+	}
 	done := webrtc.GatheringCompletePromise(p.pc)
 	if err := p.pc.SetLocalDescription(desc); err != nil {
 		return "", err
@@ -192,8 +235,53 @@ func (p *Peer) gather(ctx context.Context, desc webrtc.SessionDescription) (stri
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case <-done:
-		return p.pc.LocalDescription().SDP, nil
 	}
+	sdp := compactSDP(p.pc.LocalDescription().SDP)
+	if gwCh != nil {
+		var gw *upnpGateway
+		select {
+		case gw = <-gwCh:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		if gw != nil {
+			lease := time.Hour
+			if deadline, ok := p.lifetime.Deadline(); ok {
+				if rem := time.Until(deadline); rem > 0 {
+					lease = rem
+				}
+			}
+			var pm *portMapping
+			sdp, pm = mapAndInjectUPnP(ctx, gw, sdp, lease)
+			if pm != nil {
+				p.mu.Lock()
+				if p.closed {
+					p.mu.Unlock()
+					pm.Close()
+				} else {
+					p.portMap = pm
+					p.mu.Unlock()
+				}
+			}
+		}
+	}
+	return sdp, nil
+}
+
+// Pion repeats every candidate as component 2 (RTCP). A data channel uses
+// component 1 only, so the copies would just double the signed ticket.
+func compactSDP(raw string) string {
+	lines := strings.SplitAfter(raw, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if value, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), "a=candidate:"); ok {
+			if c, err := ice.UnmarshalCandidate(value); err == nil && c.Component() != 1 {
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "")
 }
 
 func (p *Peer) setRemote(kind webrtc.SDPType, raw string) error {

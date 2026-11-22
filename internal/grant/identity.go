@@ -21,6 +21,16 @@ func Fingerprint(key ed25519.PublicKey) string {
 	return "sha256:" + hex.EncodeToString(hash[:])
 }
 
+// ShortFingerprint formats the first 64 bits of a device fingerprint in four
+// hyphenated groups for quick out-of-band confirmation alongside a device name.
+func ShortFingerprint(fp string) string {
+	raw, ok := strings.CutPrefix(fp, "sha256:")
+	if !ok || len(raw) < 16 {
+		return ""
+	}
+	return raw[0:4] + "-" + raw[4:8] + "-" + raw[8:12] + "-" + raw[12:16]
+}
+
 func ValidFingerprint(value string) bool {
 	raw, ok := strings.CutPrefix(value, "sha256:")
 	if !ok || len(raw) != 2*sha256.Size || raw != strings.ToLower(raw) {

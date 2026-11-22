@@ -12,7 +12,7 @@ import (
 var errNewWindow = errors.New("已转到管理员窗口")
 
 func (t *Console) option(key, label string) {
-	if t.fullScreen {
+	if t.terminalUI() {
 		t.line(t.view().key(key), label)
 		return
 	}

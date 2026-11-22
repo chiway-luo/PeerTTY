@@ -111,8 +111,14 @@ func verifyLoginSSHD(ctx context.Context, dir, account string, cred *syscall.Cre
 	if cred != nil {
 		base.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
+	var baseDiag bytes.Buffer
+	base.Stderr = &baseDiag
 	original, err := base.Output()
 	if err != nil {
+		msg := strings.TrimSpace(baseDiag.String())
+		if strings.Contains(strings.ToLower(msg), "permission denied") && strings.Contains(msg, "sshd_config") {
+			return errors.New("当前账号无权读取系统 sshd_config，将改用系统 SSH 认证")
+		}
 		return fmt.Errorf("无法读取本机 SSH 账号策略: %w", err)
 	}
 	if err = checkUserKeyPolicy(original); err != nil {

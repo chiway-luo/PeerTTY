@@ -24,7 +24,7 @@ func (t *Console) host(ctx context.Context) error {
 	} else if !errors.Is(err, active.ErrInactive) {
 		return err
 	}
-	if !t.fullScreen {
+	if !t.terminalUI() {
 		fmt.Fprintln(t.out, "允许被控制 · 输入 q 返回")
 	}
 	if err := t.hostReady(ctx); err != nil {
@@ -45,14 +45,18 @@ const hostPrompt = "回执 / p 读取 / c 复制 / v 显示 / b 返回 / q 撤�
 
 func (t *Console) watchHost(ctx context.Context, st active.State) error {
 	t.section = "被控面板"
-	tick := time.NewTicker(300 * time.Millisecond)
-	defer tick.Stop()
+	defer t.setActivity("")
+	spin := time.NewTicker(spinInterval)
+	defer spin.Stop()
+	poll := time.NewTicker(600 * time.Millisecond)
+	defer poll.Stop()
 	var offer grant.Ticket
 	var pending *grant.Ticket
 	var input <-chan line
 	var previous active.State
 	for {
-		if st.Phase != previous.Phase || (st.Phase == "ready" && st != previous) {
+		if st.Phase != previous.Phase || ((st.Phase == "ready" || st.Phase == "disconnected") && st != previous) {
+			t.setActivity(waitLabel(st))
 			t.clearPage()
 			switch st.Phase {
 			case "gathering":
@@ -63,13 +67,13 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				if err != nil {
 					return err
 				}
-				if !t.fullScreen {
+				if !t.terminalUI() {
 					t.describeOffer(st, offer)
 				}
-				if err = shareTicket(ctx, t.pageOut(), "邀请", offer, t.autoCopy, !t.interactive); err != nil {
+				if err = t.shareTicket(ctx, "邀请", offer, t.autoCopy, !t.interactive); err != nil {
 					return err
 				}
-				if t.fullScreen {
+				if t.terminalUI() {
 					t.describeOffer(st, offer)
 				}
 				t.line("将邀请私发给对方，再粘贴回执或输入文件路径。")
@@ -78,7 +82,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				t.line("已批准本次连接。正在进行双向 UDP 探测。")
 			case "ready":
 				t.notice("32", "●", "被控会话已连接 · "+st.Route)
-				if !t.fullScreen {
+				if !t.terminalUI() {
 					t.line("b 返回，q 撤销并关闭全部终端。")
 				}
 				if st.Note != "" {
@@ -87,6 +91,9 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				t.line("已连接终端 ", st.Terminals)
 			case "disconnected":
 				t.notice("33", "!", reconnectNotice)
+				if st.Note != "" {
+					t.line(st.Note)
+				}
 			case "offline":
 				return errors.New(st.Note)
 			}
@@ -98,22 +105,27 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 		if input == nil && st.Phase != "gathering" {
 			input = t.next()
 		}
+		pollInterval := poll.C
+		if st.Phase == "gathering" {
+			pollInterval = nil
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-tick.C:
+		case <-spin.C:
+			t.advanceActivity()
+			if st.Phase != "gathering" {
+				continue
+			}
 			fresh, err := active.Status(ctx, t.KeyPath)
 			if err != nil || fresh.ID != st.ID {
-				t.clearPage()
-				if time.Until(st.Deadline) <= 0 {
-					t.line("授权已到期。")
-					return nil
-				}
-				if err != nil && !errors.Is(err, active.ErrInactive) {
-					return err
-				}
-				t.line("被控会话已结束。")
-				return nil
+				return t.handleHostEnded(ctx, st, err)
+			}
+			st = fresh
+		case <-pollInterval:
+			fresh, err := active.Status(ctx, t.KeyPath)
+			if err != nil || fresh.ID != st.ID {
+				return t.handleHostEnded(ctx, st, err)
 			}
 			st = fresh
 		case item := <-input:
@@ -144,7 +156,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				return nil
 			case "v", "c":
 				if st.Phase == "waiting" {
-					if err := shareTicket(ctx, t.pageOut(), "邀请", offer, strings.EqualFold(item.text, "c"), strings.EqualFold(item.text, "v")); err != nil {
+					if err := t.shareTicket(ctx, "邀请", offer, strings.EqualFold(item.text, "c"), strings.EqualFold(item.text, "v")); err != nil {
 						return err
 					}
 				}
@@ -156,6 +168,9 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 					if strings.EqualFold(item.text, "y") {
 						if err := active.Approve(ctx, t.KeyPath, st.ID, *pending); err != nil {
 							return err
+						}
+						if len(pending.Claims.Issuer) > 0 {
+							_ = grant.RecordPeer(t.KeyPath, grant.Fingerprint(pending.Claims.Issuer), pending.Claims.DeviceName, time.Now())
 						}
 						pending = nil
 						st.Phase = "connecting"
@@ -185,6 +200,25 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 	}
 }
 
+func (t *Console) handleHostEnded(ctx context.Context, st active.State, err error) error {
+	t.clearPage()
+	if time.Until(st.Deadline) <= 0 {
+		if err := active.WaitEnded(ctx, t.KeyPath, st.ID); err != nil {
+			return err
+		}
+		t.line("授权已到期。")
+		return nil
+	}
+	if err != nil && !errors.Is(err, active.ErrInactive) {
+		return err
+	}
+	if reason, _, ok := active.LastError(t.KeyPath); ok {
+		return errors.New(reason)
+	}
+	t.line("被控会话已结束。")
+	return nil
+}
+
 func (t *Console) describeOffer(st active.State, offer grant.Ticket) {
 	t.line("邀请中的直连地址 ·", transport.CountCandidates(offer.Claims.SDP))
 	t.line("邀请文件 ", st.Exchange)
@@ -195,7 +229,7 @@ func (t *Console) describeOffer(st active.State, offer grant.Ticket) {
 }
 
 func (t *Console) liveHostPrompt() {
-	if t.fullScreen {
+	if t.terminalUI() {
 		v := t.view()
 		fmt.Fprint(t.pageOut(), v.composer("输入面板命令", v.muted("b 返回  q 撤销并关闭全部终端")))
 	}
@@ -203,7 +237,7 @@ func (t *Console) liveHostPrompt() {
 
 func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *grant.Ticket) {
 	if st.Phase != "waiting" {
-		if t.fullScreen {
+		if t.terminalUI() {
 			fmt.Fprint(t.pageOut(), t.view().status(st, nil))
 			t.liveHostPrompt()
 		} else {
@@ -212,13 +246,13 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 		return
 	}
 	if pending == nil {
-		if t.fullScreen {
+		if t.terminalUI() {
 			t.describeOffer(st, offer)
 		}
 		t.writeHostPrompt(false)
 		return
 	}
-	showDeviceName(t.pageOut(), "请求控制的设备", pending.Claims.DeviceName)
+	showPeerIdentity(t.pageOut(), "请求控制的设备", t.KeyPath, pending.Claims.Issuer, pending.Claims.DeviceName)
 	t.notice("32", "✓", "回执已核验。关闭菜单后，此设备仍可在授权期内打开多个终端。")
 	if len(pending.Claims.SSHLoginKey) > 0 {
 		fmt.Fprintf(t.out, "批准后可直接登录当前账号 %s。\n", offer.Claims.SSHUser)
@@ -232,7 +266,7 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 }
 
 func (t *Console) writeHostPrompt(approval bool) {
-	if !t.fullScreen {
+	if !t.terminalUI() {
 		if approval {
 			fmt.Fprint(t.out, "y 批准本次连接，r 重选回执，q 撤销 > ")
 		} else {
@@ -251,21 +285,34 @@ func (t *Console) writeHostPrompt(approval bool) {
 func (t *Console) askDuration(ctx context.Context) (time.Duration, error) {
 	ttl := t.TTL
 	for {
-		v, err := t.prompt(ctx, fmt.Sprintf("授权时长  1–24 小时 [回车 %s] > ", ttlLabel(t.TTL)))
+		v, err := t.prompt(ctx, fmt.Sprintf("授权时长  1–24 小时或如 30m [回车 %s] > ", ttlLabel(t.TTL)))
 		if err != nil {
 			return 0, err
 		}
 		if v == "" {
 			break
 		}
-		n, err := strconv.Atoi(v)
-		if err == nil && n >= 1 && n <= 24 {
-			ttl = time.Duration(n) * time.Hour
+		if d, ok := parseGrantDuration(v); ok {
+			ttl = d
 			break
 		}
-		t.notice("33", "!", "请输入 1 到 24 的整数小时，或输入 q 返回。")
+		t.notice("33", "!", "请输入 1 到 24 的整数小时（或 1m–24h 如 30m），或输入 q 返回。")
 	}
 	return ttl, nil
+}
+
+func parseGrantDuration(v string) (time.Duration, bool) {
+	if n, err := strconv.Atoi(v); err == nil {
+		if n >= 1 && n <= 24 {
+			return time.Duration(n) * time.Hour, true
+		}
+		return 0, false
+	}
+	d, err := time.ParseDuration(strings.ToLower(v))
+	if err == nil && d >= time.Minute && d <= grant.MaxTTL {
+		return d, true
+	}
+	return 0, false
 }
 
 func ttlLabel(d time.Duration) string {

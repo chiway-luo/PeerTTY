@@ -35,14 +35,17 @@ func systemAction(message, label, path string, args ...string) Check {
 	}}
 }
 
-// ClientPath is also used when launching the actual OpenSSH client.
-func ClientPath() (string, error) {
-	path, err := exec.LookPath("ssh")
+// ToolPath resolves an OpenSSH client executable (ssh, scp, sftp) via PATH or the OS default location.
+func ToolPath(name string) (string, error) {
+	path, err := exec.LookPath(name)
 	if err != nil {
-		return systemClient()
+		return systemTool(name)
 	}
 	return path, nil
 }
+
+// ClientPath is also used when launching the actual OpenSSH client.
+func ClientPath() (string, error) { return ToolPath("ssh") }
 
 func CheckClient() Check {
 	if _, err := ClientPath(); err != nil {

@@ -25,21 +25,27 @@ type Settings struct {
 	SSHPort                            int
 	TTL                                time.Duration
 	NoClipboard                        bool
+	// Explicit* marks flags supplied on the command line so saved settings.json
+	// defaults do not override them.
+	ExplicitSTUN, ExplicitSSHPort, ExplicitTTL, ExplicitNoClipboard bool
 }
 
 type Console struct {
 	Settings
-	in           *os.File
-	out          io.Writer
-	key          ed25519.PrivateKey
-	fingerprint  string
-	pending      chan line
-	pasteTTY     *os.File
-	interactive  bool
-	fullScreen   bool
-	autoCopy     bool
-	section      string
-	headingDrawn bool
+	in              *os.File
+	out             io.Writer
+	key             ed25519.PrivateKey
+	fingerprint     string
+	pending         chan line
+	pasteTTY        *os.File
+	interactive     bool
+	fullScreen      bool
+	autoCopy        bool
+	copyToClipboard func(context.Context, io.Writer, grant.Ticket) (string, error)
+	section         string
+	headingDrawn    bool
+	activity        string
+	frame           int
 }
 
 var errBack = errors.New("返回菜单")
@@ -74,6 +80,7 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 		return err
 	}
 	opts.KeyPath = path
+	applySavedSettings(&opts)
 	if opts.SSHConfig != "" && opts.SSHConfig != "none" {
 		opts.SSHConfig, err = userPath(opts.SSHConfig)
 		if err != nil {
@@ -129,8 +136,17 @@ func (t *Console) menu(ctx context.Context) error {
 			if s, err = active.Status(ctx, t.KeyPath); err == nil {
 				err = t.linkSSH(ctx, s)
 			}
-			if err == nil && t.fullScreen {
+			if err == nil && t.terminalUI() {
 				page = homePage
+			}
+		case "/receipt":
+			var s active.State
+			if s, err = active.Status(ctx, t.KeyPath); err == nil {
+				if s.Role == "control" {
+					err = t.controlPanel(ctx, s, false, true)
+				} else {
+					err = errors.New("请在本次授权的控制端查看回执")
+				}
 			}
 		case "/status":
 			page = statusPage
@@ -155,13 +171,15 @@ func (t *Console) menu(ctx context.Context) error {
 			page = helpPage
 		case "/clipboard":
 			t.autoCopy = !t.autoCopy
+			t.NoClipboard = !t.autoCopy
+			_ = saveSettings(t.Settings)
 			if t.autoCopy {
 				t.notice("32", "✓", "凭证自动复制已开启。")
 			} else {
 				t.notice("32", "✓", "凭证自动复制已关闭。")
 			}
 		case "", "b", "/back":
-			if t.fullScreen {
+			if t.terminalUI() {
 				page = homePage
 			}
 			continue
@@ -188,7 +206,7 @@ func (t *Console) menu(ctx context.Context) error {
 			continue
 		}
 		if errors.Is(err, errBack) {
-			if t.fullScreen {
+			if t.terminalUI() {
 				page = homePage
 			}
 			continue
@@ -205,12 +223,12 @@ func (t *Console) menu(ctx context.Context) error {
 }
 
 func (t *Console) settings(ctx context.Context) error {
-	if t.fullScreen {
+	if t.terminalUI() {
 		v := t.view()
-		t.line(v.muted("生效范围  ") + "本次运行")
+		t.line(v.muted("生效范围  ") + "保存为默认设置")
 		t.line(v.muted("设备密钥  ") + t.KeyPath)
 	} else {
-		fmt.Fprintf(t.out, "连接设置（本次运行）\n设备密钥  %s\n", t.KeyPath)
+		fmt.Fprintf(t.out, "连接设置（保存为默认设置）\n设备密钥  %s\n", t.KeyPath)
 	}
 	urls, _ := transport.STUNServers(t.STUN)
 	v, err := t.prompt(ctx, fmt.Sprintf("STUN [%s]\n回车保留，auto 使用默认服务，none 关闭，多个地址用英文逗号分隔 > ", serverList(urls)))
@@ -233,6 +251,7 @@ func (t *Console) settings(ctx context.Context) error {
 		return err
 	}
 	t.STUN, t.SSHPort = newSTUN, port
+	_ = saveSettings(t.Settings)
 	t.notice("32", "✓", "连接设置已应用。")
 	return nil
 }

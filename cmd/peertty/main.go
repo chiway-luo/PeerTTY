@@ -25,10 +25,12 @@ import (
 // Release builds set version from the project's VERSION file.
 var version = "dev"
 
-const usage = `PeerTTY — single-session, direct SSH for Windows, macOS and Linux
+const usage = `PeerTTY — peer-to-peer direct SSH for Windows, macOS and Linux
   peertty             打开终端菜单，选择控制设备或允许被控制
   peertty --version   显示程序版本
   peertty link        [-t] [-- 远端命令及参数] 打开已授权设备的 SSH 终端，-t 为命令分配交互终端
+  peertty cp          [-r] <源路径>... <目标路径> 通过已授权直连传输文件（远端路径以 : 开头，如 :/var/log/syslog ./）
+  peertty sftp        [sftp 参数...] 通过已授权直连打开交互式 SFTP 文件传输
   peertty status      显示当前授权、剩余时间和终端数
   peertty revoke      结束本机当前授权及其所有 SSH 终端
   peertty doctor      [-stun auto|none|URL,URL] [-require-mapping]
@@ -46,7 +48,7 @@ func main() {
 	stop()
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		var exit *exec.ExitError
-		if len(os.Args) > 1 && os.Args[1] == "link" && errors.As(err, &exit) && exit.ExitCode() > 0 {
+		if len(os.Args) > 1 && (os.Args[1] == "link" || os.Args[1] == "cp" || os.Args[1] == "sftp") && errors.As(err, &exit) && exit.ExitCode() > 0 {
 			os.Exit(exit.ExitCode())
 		}
 		fmt.Fprintln(os.Stderr, "peertty:", err)
@@ -111,12 +113,16 @@ func run(ctx context.Context, args []string) error {
 		return active.Main(ctx)
 	case "_link-proxy":
 		return console.LinkProxy(ctx, os.Stdin, os.Stdout)
-	case "link", "status", "revoke":
+	case "link", "cp", "sftp", "status", "revoke":
 		dir := fs.String("state-dir", "", "设备身份目录")
 		key := fs.String("key", "", "已有设备密钥")
 		var remote console.RemoteCommand
+		var recursive bool
 		if args[0] == "link" {
 			fs.BoolVar(&remote.TTY, "t", false, "为远端命令分配终端，例如交互式 sudo")
+		}
+		if args[0] == "cp" {
+			fs.BoolVar(&recursive, "r", false, "递归传输目录")
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -125,9 +131,14 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if args[0] == "link" {
+		switch args[0] {
+		case "link":
 			remote.Args = fs.Args()
 			return console.Link(ctx, path, os.Stdin, os.Stdout, os.Stderr, remote)
+		case "cp":
+			return console.Copy(ctx, path, os.Stdin, os.Stdout, os.Stderr, recursive, fs.Args())
+		case "sftp":
+			return console.SFTP(ctx, path, os.Stdin, os.Stdout, os.Stderr, fs.Args())
 		}
 		if fs.NArg() != 0 {
 			return errors.New("状态与撤销命令不接受额外参数")
@@ -150,6 +161,18 @@ func run(ctx context.Context, args []string) error {
 		if err := parse(); err != nil {
 			return err
 		}
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "stun":
+				opts.ExplicitSTUN = true
+			case "ssh-port":
+				opts.ExplicitSSHPort = true
+			case "ttl":
+				opts.ExplicitTTL = true
+			case "no-clipboard":
+				opts.ExplicitNoClipboard = true
+			}
+		})
 		if opts.StateDir != "" && opts.KeyPath != "" {
 			return errors.New("-state-dir 和 -key 请选择一个")
 		}

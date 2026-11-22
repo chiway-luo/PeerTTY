@@ -150,7 +150,7 @@ func (t *Console) ask(ctx context.Context, prompt string) (string, error) {
 }
 
 func (t *Console) prompt(ctx context.Context, prompt string) (string, error) {
-	if t.fullScreen {
+	if t.terminalUI() {
 		prompt = t.view().fieldPrompt(prompt, "q 返回主菜单")
 	}
 	v, err := t.ask(ctx, prompt)

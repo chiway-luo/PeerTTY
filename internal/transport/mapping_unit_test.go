@@ -85,3 +85,52 @@ func TestGatheringSocketRefreshesOnlyMappedPeersOfItsAddressFamily(t *testing.T)
 		t.Fatalf("closing did not stop discovery: %v", err)
 	}
 }
+
+type mockReadWriteUDP struct {
+	memoryUDP
+	readData []byte
+	readFrom net.Addr
+}
+
+func (c *mockReadWriteUDP) ReadFrom(p []byte) (int, net.Addr, error) {
+	n := copy(p, c.readData)
+	return n, c.readFrom, nil
+}
+
+func TestGatheringSocketIgnoresNonDiscoveryAndPrioritizesConfirmedSTUN(t *testing.T) {
+	dead := netip.MustParseAddrPort("192.0.2.1:3478")
+	live := netip.MustParseAddrPort("192.0.2.2:19302")
+	resp := stun.MustBuild(stun.TransactionID, stun.BindingSuccess)
+	base := &mockReadWriteUDP{
+		memoryUDP: memoryUDP{writes: make(chan recordedDatagram, 20)},
+		readData:  resp.Raw,
+		readFrom:  net.UDPAddrFromAddrPort(live),
+	}
+	n := &signalingNet{Net: memoryNet{conn: &base.memoryUDP}, ctx: t.Context(), interval: 10 * time.Millisecond}
+	c := &gatheringSocket{UDPConn: base, ctx: t.Context(), stop: func() {}, signaling: n}
+
+	// Non-STUN packet first must not disarm subsequent STUN discovery refresh.
+	if _, err := c.WriteTo([]byte("hello"), net.UDPAddrFromAddrPort(dead)); err != nil {
+		t.Fatal(err)
+	}
+	// Authenticated ICE binding request must also be ignored for server tracking.
+	iceReq := stun.MustBuild(stun.BindingRequest, stun.TransactionID, stun.NewUsername("u:p"))
+	if _, err := c.WriteTo(iceReq.Raw, net.UDPAddrFromAddrPort(dead)); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.refreshTargets()) != 0 {
+		t.Fatalf("tracked non-discovery packet as STUN server: %v", c.refreshTargets())
+	}
+
+	req := stun.MustBuild(stun.BindingRequest, stun.TransactionID)
+	_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(dead))
+	_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(live))
+	buf := make([]byte, 128)
+	if _, _, err := c.ReadFrom(buf); err != nil {
+		t.Fatal(err)
+	}
+	got := c.refreshTargets()
+	if len(got) != 1 || got[0] != live {
+		t.Fatalf("refreshTargets() = %v, want only confirmed [%v]", got, live)
+	}
+}

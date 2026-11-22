@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"golang.org/x/term"
 
 	"peertty/internal/active"
@@ -20,10 +21,11 @@ const (
 )
 
 func (t *Console) openScreen() func() {
-	if !t.interactive || os.Getenv("TERM") == "dumb" {
+	out, ok := t.out.(*os.File)
+	if !t.interactive || !ok || os.Getenv("TERM") == "dumb" {
 		return func() {}
 	}
-	restore := enableScreenOutput(t.out.(*os.File))
+	restore := enableScreenOutput(out)
 	if restore == nil {
 		return func() {}
 	}
@@ -36,17 +38,23 @@ func (t *Console) openScreen() func() {
 	}
 }
 
+func (t *Console) terminalUI() bool { return t.interactive || t.fullScreen }
+
 func (t *Console) clearPage() {
+	t.headingDrawn = false
 	if t.fullScreen {
 		fmt.Fprint(t.out, erasePage)
-		t.headingDrawn = false
+		if t.activity != "" {
+			t.drawActivity()
+			fmt.Fprint(t.out, "\x1b[2;1H")
+		}
 	}
 }
 
 // Emit a section heading only when the new page actually produces content.
 // Return the original writer so clipboard and native terminal detection still work.
 func (t *Console) pageOut() io.Writer {
-	if t.fullScreen && t.section != "" && !t.headingDrawn {
+	if t.section != "" && !t.headingDrawn {
 		fmt.Fprint(t.out, t.view().heading(t.section))
 		t.headingDrawn = true
 	}
@@ -54,7 +62,7 @@ func (t *Console) pageOut() io.Writer {
 }
 
 func (t *Console) notice(color, mark, text string) {
-	if t.fullScreen {
+	if t.terminalUI() {
 		v := t.view()
 		fmt.Fprintln(t.pageOut(), v.margin+v.ink(color, mark)+" "+text)
 	} else {
@@ -64,7 +72,7 @@ func (t *Console) notice(color, mark, text string) {
 
 func (t *Console) line(parts ...any) {
 	out := t.pageOut()
-	if t.fullScreen {
+	if t.terminalUI() {
 		fmt.Fprint(out, t.view().margin)
 	}
 	fmt.Fprintln(out, parts...)
@@ -90,52 +98,17 @@ const (
 )
 
 func (t *Console) drawMenu(v terminalView, page menuPage, s active.State, err error) {
-	t.clearPage()
-	if page == helpPage {
-		if t.fullScreen {
-			fmt.Fprint(t.pageOut(), v.help())
-		} else {
-			fmt.Fprintln(t.out, "全部操作")
-			for _, group := range helpGroups {
-				for _, a := range group.actions {
-					fmt.Fprintf(t.out, "  %-11s %1s  %s\n", a.command, a.key, a.title)
-				}
-			}
-		}
-		return
-	}
 	if page == homePage {
 		t.section = ""
 	}
-	if t.fullScreen {
-		if page == homePage {
-			fmt.Fprint(t.out, v.home(t.Version, t.SSHPort, s, err))
-		} else {
-			fmt.Fprint(t.pageOut(), v.status(s, err))
-		}
-		return
-	}
-	if page == homePage {
-		fmt.Fprintln(t.out, "PeerTTY · 点对点远程终端")
-		fmt.Fprintln(t.out, "1 /connect 控制设备    2 /host 允许被控制    /help 全部操作")
-		fmt.Fprintln(t.out, "可直接粘贴邀请，/paste 读取剪贴板，/status 查看授权。")
-	}
-	if err != nil {
-		if page == statusPage {
-			fmt.Fprintln(t.out, err)
-		}
-		return
-	}
-	printStatus(t.out, s)
-	if page == statusPage && s.Phase == "disconnected" {
-		fmt.Fprintln(t.out, "/revoke 立即结束授权")
-	}
-	if page == homePage {
-		if s.Role == "host" {
-			fmt.Fprintln(t.out, "/host 查看活动和邀请，/revoke 撤销。")
-		} else {
-			fmt.Fprintln(t.out, "/link 打开终端，/revoke 结束授权。")
-		}
+	t.clearPage()
+	switch page {
+	case homePage:
+		fmt.Fprint(t.out, v.home(t.Version, t.SSHPort, s, err))
+	case statusPage:
+		fmt.Fprint(t.pageOut(), v.status(s, err))
+	case helpPage:
+		fmt.Fprint(t.pageOut(), v.help())
 	}
 }
 
@@ -144,28 +117,36 @@ func (t *Console) drawMenu(v terminalView, page menuPage, s active.State, err er
 func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error) {
 	v := t.view()
 	if page == resultPage {
-		if t.fullScreen {
-			return t.ask(ctx, v.commandPrompt(false, false))
-		}
-		return t.ask(ctx, "❯ ")
+		return t.ask(ctx, v.commandPrompt(false, false))
 	}
 	var last active.State
 	var statusErr error
 	if page != helpPage {
 		last, statusErr = active.Status(ctx, t.KeyPath)
 	}
+	t.setActivity(waitLabel(last))
+	defer t.setActivity("")
 	t.drawMenu(v, page, last, statusErr)
-	if !t.fullScreen {
-		return t.ask(ctx, "❯ ")
-	}
 	prompt := v.commandPrompt(page == homePage, last.ID != "")
+	if !t.terminalUI() {
+		return t.ask(ctx, prompt)
+	}
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	frames := time.NewTicker(spinInterval)
+	defer frames.Stop()
 	fmt.Fprint(t.out, prompt)
+	var ended string
 	for {
+		var animation <-chan time.Time
+		if t.activity != "" {
+			animation = frames.C
+		}
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
+		case <-animation:
+			t.advanceActivity()
 		case item := <-t.next():
 			t.submitEntry()
 			if _, ok := item.err.(inputIssue); ok {
@@ -187,9 +168,18 @@ func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error)
 			if nextView != v || s != last || (statusErr == nil) != (err == nil) {
 				v = nextView
 				prompt = v.commandPrompt(page == homePage, s.ID != "")
+				t.setActivity(waitLabel(s))
 				t.drawMenu(v, page, s, err)
-				if page == homePage && last.ID != "" && errors.Is(err, active.ErrInactive) {
-					fmt.Fprintln(t.out, "授权已结束。")
+				if last.ID != "" && errors.Is(err, active.ErrInactive) {
+					ended = "授权已结束。"
+					if last.Phase == "disconnected" || last.Phase == "offline" {
+						ended = "直连已断开，本次授权已结束。请双方重新配对。"
+					}
+				} else if s.ID != "" {
+					ended = ""
+				}
+				if ended != "" {
+					t.notice("33", "!", ended)
 				}
 				fmt.Fprint(t.out, prompt)
 				last, statusErr = s, err
@@ -200,5 +190,5 @@ func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error)
 
 func terminalFile(w io.Writer) bool {
 	f, ok := w.(*os.File)
-	return ok && term.IsTerminal(int(f.Fd()))
+	return ok && f != nil && (term.IsTerminal(int(f.Fd())) || isatty.IsCygwinTerminal(f.Fd()))
 }

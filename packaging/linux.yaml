@@ -6,7 +6,7 @@ release: 1
 section: net
 priority: optional
 maintainer: PeerTTY Project <peertty@localhost>
-description: Single-session peer-to-peer SSH terminal with local approval.
+description: Peer-to-peer direct SSH terminal and file transfer with local approval.
 contents:
   - src: ./peertty
     dst: /usr/bin/peertty

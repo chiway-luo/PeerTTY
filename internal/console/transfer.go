@@ -1,0 +1,173 @@
+package console
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"peertty/internal/active"
+	"peertty/internal/localssh"
+)
+
+// transferSSHOptions builds the common OpenSSH -o/-F/-i options shared by scp
+// and sftp so file transfers inherit the exact same host-pinning and sandbox rules.
+func transferSSHOptions(exe string, s active.State) []string {
+	args := []string{
+		"-o", "ServerAliveInterval=5",
+		"-o", "ServerAliveCountMax=5",
+		"-o", "ControlPath=none",
+		"-o", "ControlMaster=no",
+		"-o", "ClearAllForwardings=yes",
+		"-o", "ForwardAgent=no",
+		"-o", "PermitLocalCommand=no",
+		"-o", "ProxyUseFdpass=no",
+		"-o", "ConnectTimeout=45",
+		"-o", "HostKeyAlias=" + s.Alias,
+		"-o", proxyCommand(exe, runtime.GOOS, "_link-proxy"),
+	}
+	if s.KnownHosts != "" {
+		known := strconv.Quote(strings.ReplaceAll(filepath.ToSlash(s.KnownHosts), "%", "%%"))
+		args = append(args, "-F", "none",
+			"-o", "BatchMode=yes",
+			"-o", "PreferredAuthentications=publickey",
+			"-o", "IdentityAgent=none",
+			"-o", "StrictHostKeyChecking=yes",
+			"-o", "UpdateHostKeys=no",
+			"-o", "GlobalKnownHostsFile=none",
+			"-o", "UserKnownHostsFile="+known,
+		)
+	} else if s.SSHConfig != "" {
+		args = append(args, "-F", s.SSHConfig)
+	}
+	if s.Identity != "" {
+		args = append(args, "-o", "IdentitiesOnly=yes", "-i", s.Identity)
+	}
+	return args
+}
+
+func resolveTransferGrant(ctx context.Context, key string, diag io.Writer) (active.State, error) {
+	s, err := active.Status(ctx, key)
+	if err != nil {
+		return active.State{}, err
+	}
+	if s.Role == "control" && s.Phase == "disconnected" {
+		if terminalFile(diag) {
+			fmt.Fprintln(diag, reconnectRevokeHint)
+		}
+		tick := time.NewTicker(300 * time.Millisecond)
+		defer tick.Stop()
+		s, err = waitReconnect(ctx, s, diag, tick.C, func(ctx context.Context) (active.State, error) {
+			return active.Status(ctx, key)
+		})
+		if err != nil {
+			return active.State{}, err
+		}
+	}
+	if s.Role != "control" || s.Phase != "ready" {
+		if s.Phase == "offline" {
+			return active.State{}, fmt.Errorf("直连已断开，请重新配对 · %s", s.Note)
+		}
+		return active.State{}, errors.New("本机尚无已连接的控制授权，输入 peertty status 查看状态")
+	}
+	return s, nil
+}
+
+// expandRemoteArg turns ":path" or "remote:path" into "<user>@<alias>:<path>"
+// without touching Windows drive paths such as "C:\foo" or local paths.
+func expandRemoteArg(arg string, s active.State) (string, bool) {
+	target := s.User + "@" + s.Alias
+	if strings.HasPrefix(arg, ":") {
+		return target + arg, true
+	}
+	if rest, ok := strings.CutPrefix(arg, "remote:"); ok {
+		return target + ":" + rest, true
+	}
+	return arg, false
+}
+
+func scpArgs(exe string, s active.State, recursive bool, paths []string) ([]string, error) {
+	if len(paths) < 2 {
+		return nil, errors.New("用法: peertty cp [-r] <源路径>... <目标路径>（远端路径用 : 开头，例如 :/var/log/syslog ./）")
+	}
+	args := transferSSHOptions(exe, s)
+	if recursive {
+		args = append(args, "-r")
+	}
+	hasRemote := false
+	expanded := make([]string, len(paths))
+	for i, p := range paths {
+		var remote bool
+		expanded[i], remote = expandRemoteArg(p, s)
+		if remote {
+			hasRemote = true
+		}
+	}
+	if !hasRemote {
+		return nil, errors.New("请用 : 开头标明远端路径，例如 peertty cp :/etc/hosts ./hosts 或 peertty cp ./a.sh :/tmp/")
+	}
+	args = append(args, "--")
+	return append(args, expanded...), nil
+}
+
+func sftpArgs(exe string, s active.State, extra []string) []string {
+	args := transferSSHOptions(exe, s)
+	args = append(args, extra...)
+	return append(args, s.User+"@"+s.Alias)
+}
+
+// Copy transfers files over the active PeerTTY grant using native OpenSSH scp.
+// Remote paths are prefixed with ":" (for example ":/var/log/app.log" or "remote:/tmp/file").
+func Copy(ctx context.Context, key string, in *os.File, out, diag io.Writer, recursive bool, paths []string) error {
+	s, err := resolveTransferGrant(ctx, key, diag)
+	if err != nil {
+		return err
+	}
+	return runTransfer(ctx, key, s, in, out, diag, "scp", func(exe string) ([]string, error) {
+		return scpArgs(exe, s, recursive, paths)
+	}, (*exec.Cmd).Run)
+}
+
+// SFTP launches an interactive native OpenSSH sftp session over the active grant.
+func SFTP(ctx context.Context, key string, in *os.File, out, diag io.Writer, extra []string) error {
+	s, err := resolveTransferGrant(ctx, key, diag)
+	if err != nil {
+		return err
+	}
+	return runTransfer(ctx, key, s, in, out, diag, "sftp", func(exe string) ([]string, error) {
+		return sftpArgs(exe, s, extra), nil
+	}, (*exec.Cmd).Run)
+}
+
+func runTransfer(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, tool string, buildArgs func(exe string) ([]string, error), run func(*exec.Cmd) error) (result error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args, err := buildArgs(exe)
+	if err != nil {
+		return err
+	}
+	bin, err := localssh.ToolPath(tool)
+	if err != nil {
+		return fmt.Errorf("未找到本机 OpenSSH %s 工具: %w", tool, err)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, diag
+	cmd.Env = append(os.Environ(), programEnv+"="+exe, "PEERTTY_LINK_KEY="+key, "PEERTTY_LINK_ID="+s.ID)
+	if in != nil {
+		restore, err := keepSSHInput(in)
+		if err != nil {
+			return err
+		}
+		defer func() { result = errors.Join(result, restore()) }()
+	}
+	return run(cmd)
+}

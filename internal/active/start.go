@@ -32,6 +32,11 @@ func Start(ctx context.Context, opts Options) (State, error) {
 	cmd := exec.Command(exe, Command)
 	detach(cmd)
 	cmd.Stdin, cmd.Stdout = &input, write
+	logFile := openWorkerLog(opts.Key)
+	if logFile != nil {
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	}
 	if err = cmd.Start(); err != nil {
 		write.Close()
 		return state, err

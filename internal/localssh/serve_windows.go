@@ -61,6 +61,49 @@ func ownsListener(pid, port int) (bool, error) {
 	}
 }
 
+// ownsClientConnection verifies via GetExtendedTcpTable that the temporary sshd
+// process has an active loopback connection from the exact parent client port,
+// and no unexpected local peer is attached to it.
+func ownsClientConnection(pid, localPort, clientPort int) (bool, error) {
+	const connectionsWithPID = 4
+	size := uint32(4096)
+	for {
+		table := make([]byte, size)
+		code, _, _ := tcpTable.Call(uintptr(unsafe.Pointer(&table[0])), uintptr(unsafe.Pointer(&size)),
+			0, windows.AF_INET, connectionsWithPID, 0)
+		if syscall.Errno(code) == windows.ERROR_INSUFFICIENT_BUFFER {
+			continue
+		}
+		if code != 0 {
+			return false, syscall.Errno(code)
+		}
+		if size < 4 || size > uint32(len(table)) {
+			return false, errors.New("无效的 Windows TCP 连接表")
+		}
+		count := binary.LittleEndian.Uint32(table[:4])
+		const rowSize = 24
+		if count > (size-4)/rowSize {
+			return false, errors.New("Windows TCP 连接表不完整")
+		}
+		matched := false
+		for i := uint32(0); i < count; i++ {
+			row := table[4+i*rowSize : 4+(i+1)*rowSize]
+			if binary.LittleEndian.Uint32(row[20:24]) != uint32(pid) {
+				continue
+			}
+			laddr := binary.BigEndian.Uint32(row[4:8])
+			lport := int(binary.BigEndian.Uint16(row[8:10]))
+			raddr := binary.BigEndian.Uint32(row[12:16])
+			rport := int(binary.BigEndian.Uint16(row[16:18]))
+			if laddr != 0x7f000001 || lport != localPort || raddr != 0x7f000001 || rport != clientPort {
+				return false, errors.New("检测到未授权的本机连接接入临时 OpenSSH")
+			}
+			matched = true
+		}
+		return matched, nil
+	}
+}
+
 func guardCmd(exe, deadline string) *exec.Cmd {
 	return exec.Command(exe, GuardCommand, deadline)
 }
@@ -92,7 +135,7 @@ func windowsListenArgs(port int) []string {
 
 func windowsSSHDArgs() []string {
 	return []string{"-4", "-p", "22", "-o", "ListenAddress=127.0.0.1:22", "-o", "PidFile=none",
-		"-o", "MaxSessions=1", "-o", "DisableForwarding=yes"}
+		"-o", "MaxSessions=1", "-o", "MaxStartups=1:100:1", "-o", "DisableForwarding=yes"}
 }
 
 func checkWindowsConfig(ctx context.Context, path string) error {
@@ -138,34 +181,50 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	if err := ownProcessTree(); err != nil {
 		return fmt.Errorf("创建临时 OpenSSH 进程组: %w", err)
 	}
-	port := 22
-	ready := "READY"
-	args := append([]string{"-D", "-e"}, windowsSSHDArgs()...)
-	if mode != "" {
-		if mode == "login-open" {
-			l, err := net.Listen("tcp4", "127.0.0.1:0")
+	attempts := 1
+	if mode == "login-open" {
+		attempts = 5
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		port := 22
+		ready := "READY"
+		args := append([]string{"-D", "-e"}, windowsSSHDArgs()...)
+		if mode != "" {
+			if mode == "login-open" {
+				l, err := net.Listen("tcp4", "127.0.0.1:0")
+				if err != nil {
+					return err
+				}
+				port = l.Addr().(*net.TCPAddr).Port
+				l.Close()
+				ready = fmt.Sprintf("READY %d", port)
+			}
+			login, err := windowsLoginArgs(ctx, dir, port)
 			if err != nil {
 				return err
 			}
-			port = l.Addr().(*net.TCPAddr).Port
-			l.Close()
-			ready = fmt.Sprintf("READY %d", port)
-		}
-		login, err := windowsLoginArgs(ctx, dir, port)
-		if err != nil {
+			// Native debug mode serves one connection as the current user.
+			args = append([]string{"-d", "-e"}, login...)
+		} else if err := checkWindowsConfig(ctx, path); err != nil {
 			return err
 		}
-		// Native debug mode serves one connection as the current user.
-		args = append([]string{"-d", "-e"}, login...)
-	} else if err := checkWindowsConfig(ctx, path); err != nil {
-		return err
+		err, retry := runWindowsSSHD(ctx, path, args, port, ready, ports, out)
+		if !retry {
+			return err
+		}
+		lastErr = err
 	}
+	return lastErr
+}
+
+func runWindowsSSHD(ctx context.Context, path string, args []string, port int, ready string, ports <-chan int, out io.Writer) (error, bool) {
 	run, cancel := context.WithCancel(ctx)
 	defer cancel()
 	server := exec.CommandContext(run, path, args...)
 	server.Stderr = os.Stderr
 	if err := server.Start(); err != nil {
-		return err
+		return err, false
 	}
 	done := make(chan struct{})
 	var waitErr error
@@ -178,28 +237,47 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	for {
 		select {
 		case <-start.Done():
-			return start.Err()
+			return start.Err(), false
 		case <-done:
-			return fmt.Errorf("OpenSSH 在建立连接前退出 (%v)", waitErr)
+			return fmt.Errorf("OpenSSH 在建立连接前退出 (%v)", waitErr), true
 		case <-tick.C:
 		}
-		ready, err := ownsListener(server.Process.Pid, port)
+		listening, err := ownsListener(server.Process.Pid, port)
 		if err != nil {
-			return err
+			return err, false
 		}
-		if ready {
+		if listening {
 			break
 		}
 	}
-	if _, err := peerPort(start, ports, out, ready); err != nil {
-		return err
+	clientPort, err := peerPort(start, ports, out, ready)
+	if err != nil {
+		return err, false
+	}
+	// Verify that the attached connection belongs to the parent's exact local port.
+	verifyDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(verifyDeadline) {
+		ok, err := ownsClientConnection(server.Process.Pid, port, clientPort)
+		if err != nil {
+			return err, false
+		}
+		if ok {
+			break
+		}
+		select {
+		case <-start.Done():
+			return start.Err(), false
+		case <-done:
+			return fmt.Errorf("OpenSSH 在验证连接前退出 (%v)", waitErr), false
+		case <-tick.C:
+		}
 	}
 	if _, err := fmt.Fprintln(out, "ATTACHED"); err != nil {
-		return err
+		return err, false
 	}
 	<-done
 	if ctx.Err() != nil {
-		return nil
+		return nil, false
 	}
-	return waitErr
+	return waitErr, false
 }

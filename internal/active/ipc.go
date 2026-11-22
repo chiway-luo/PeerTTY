@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"peertty/internal/grant"
@@ -60,6 +62,56 @@ func localTLS(key ed25519.PrivateKey) (*tls.Config, error) {
 	pool.AddCert(cert)
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
 		RootCAs: pool, ClientCAs: pool, ClientAuth: tls.RequireAndVerifyClientCert, ServerName: "localhost"}, nil
+}
+
+type cachedTLSEntry struct {
+	digest [sha256.Size]byte
+	cfg    *tls.Config
+}
+
+var (
+	tlsCacheMu sync.Mutex
+	tlsCache   = map[string]cachedTLSEntry{}
+)
+
+// cachedLocalTLS avoids regenerating a self-signed Ed25519 X.509 certificate
+// on every status poll while immediately invalidating if the key file changes.
+func cachedLocalTLS(keyPath string) (*tls.Config, error) {
+	f, err := os.Open(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(f, 4097))
+	_ = f.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if len(raw) > 4096 {
+		return nil, errors.New("device key file exceeds size limit")
+	}
+	digest := sha256.Sum256(raw)
+	tlsCacheMu.Lock()
+	if entry, ok := tlsCache[keyPath]; ok && entry.digest == digest {
+		tlsCacheMu.Unlock()
+		return entry.cfg.Clone(), nil
+	}
+	tlsCacheMu.Unlock()
+
+	key, err := grant.LoadIdentity(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := localTLS(key)
+	if err != nil {
+		return nil, err
+	}
+	tlsCacheMu.Lock()
+	if len(tlsCache) >= 32 {
+		clear(tlsCache)
+	}
+	tlsCache[keyPath] = cachedTLSEntry{digest: digest, cfg: cfg}
+	tlsCacheMu.Unlock()
+	return cfg.Clone(), nil
 }
 
 const frameLimit = 2 * grant.MaxTicketSize
@@ -109,11 +161,7 @@ func call(ctx context.Context, keyPath string, req request) (*tls.Conn, State, e
 	if err != nil || port == 0 {
 		return nil, st, errors.New("不能读取本机授权状态")
 	}
-	key, err := grant.LoadIdentity(keyPath)
-	if err != nil {
-		return nil, st, err
-	}
-	cfg, err := localTLS(key)
+	cfg, err := cachedLocalTLS(keyPath)
 	if err != nil {
 		return nil, st, err
 	}
@@ -167,6 +215,12 @@ func Revoke(ctx context.Context, path, id string) error {
 	if _, err := action(ctx, path, request{Op: "revoke", ID: id}); err != nil {
 		return err
 	}
+	return WaitEnded(ctx, path, id)
+}
+
+// The listener can close before all streams and the device lease are released.
+// A replacement grant also proves that its predecessor completed cleanup.
+func WaitEnded(ctx context.Context, path, id string) error {
 	until, stop := context.WithTimeout(ctx, 10*time.Second)
 	defer stop()
 	tick := time.NewTicker(50 * time.Millisecond)
@@ -174,7 +228,7 @@ func Revoke(ctx context.Context, path, id string) error {
 	for {
 		select {
 		case <-until.Done():
-			return errors.New("撤销已发送，后台仍在回收连接")
+			return errors.New("后台仍在回收本次连接")
 		case <-tick.C:
 		}
 		s, err := Status(until, path)

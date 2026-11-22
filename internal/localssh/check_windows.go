@@ -11,12 +11,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func systemClient() (string, error) {
+func systemTool(name string) (string, error) {
 	dir, err := windows.GetSystemDirectory()
 	if err != nil {
 		return "", err
 	}
-	return exec.LookPath(filepath.Join(dir, "OpenSSH", "ssh.exe"))
+	return exec.LookPath(filepath.Join(dir, "OpenSSH", name+".exe"))
 }
 
 func missingOpenSSH(server bool) Check {

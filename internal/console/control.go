@@ -9,18 +9,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"peertty/internal/active"
-	"runtime"
 	"strings"
 	"time"
 	"unicode"
 
+	"peertty/internal/active"
 	"peertty/internal/bridge"
 	"peertty/internal/filelock"
 	"peertty/internal/grant"
 	"peertty/internal/localssh"
 	"peertty/internal/session"
-	"peertty/internal/transport"
 )
 
 const proxyEnv = "PEERTTY_CONSOLE_PROXY"
@@ -28,7 +26,7 @@ const programEnv = "PEERTTY_CONSOLE_PROGRAM"
 
 type handoff struct {
 	Key, Peer, Offer, Answer, STUN string
-	Text, Copy                     bool
+	Text, Copy, Interactive        bool
 }
 
 // RunProxy is OpenSSH's child. It owns the role lease until its stream closes.
@@ -65,18 +63,21 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return session.RunControl(ctx, session.Config{Key: key, Peer: h.Peer, STUN: h.STUN}, offer, end, func(answer grant.Ticket) error {
-		if err := answer.WriteNew(h.Answer); err != nil {
-			return err
+	panel := &Console{out: log, autoCopy: h.Copy, section: "控制端回执"}
+	if h.Interactive && terminalFile(log) {
+		if keyboard, err := os.Open(terminalInputPath); err == nil {
+			defer keyboard.Close()
+			panel.in, panel.interactive = keyboard, true
 		}
-		fmt.Fprintln(log, "回执中的直连地址 ·", transport.CountCandidates(answer.Claims.SDP))
-		fmt.Fprintf(log, "回执文件  %s\n", h.Answer)
-		if err := shareTicket(ctx, log, "回执", answer, h.Copy, h.Text && !h.Copy); err != nil {
-			return err
-		}
-		fmt.Fprintln(log, "请发回回执，等待被控方批准。")
-		return nil
-	}, func(route string) { close(connected); fmt.Fprintf(log, "控制会话已连接 · %s\n", route) })
+	}
+	st := active.State{Role: "control", Phase: "gathering", Deadline: offer.Deadline(), Exchange: h.Answer}
+	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN}
+	return panel.singleUseReceipt(ctx, st, h.Text, func(ctx context.Context, publish func(grant.Ticket) error, ready func(string)) error {
+		return session.RunControl(ctx, cfg, offer, end, publish, func(route string) {
+			close(connected)
+			ready(route)
+		})
+	})
 }
 func proxyCommand(exe, platform, command string) string {
 	if platform == "windows" {
@@ -88,7 +89,7 @@ func proxyCommand(exe, platform, command string) string {
 }
 
 func (t *Console) control(ctx context.Context, invitation string) (result error) {
-	if !t.fullScreen {
+	if !t.terminalUI() {
 		fmt.Fprintln(t.out, "控制设备 · 输入 q 返回")
 	}
 	if err := t.checkSSH(ctx, false, localssh.CheckClient); err != nil {
@@ -96,9 +97,7 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	}
 	var err error
 	if invitation == "" {
-		if runtime.GOOS == "darwin" {
-			t.line("按 ⌘V 粘贴邀请并回车，或输入 p 从剪贴板读取。")
-		}
+		t.line("粘贴邀请并回车，或输入 p 从剪贴板读取。")
 		invitation, err = t.prompt(ctx, "邀请文件路径或整段邀请文本 > ")
 		if err != nil {
 			return err
@@ -122,8 +121,22 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	if err = offer.VerifyOffer(peer, t.fingerprint, time.Now()); err != nil {
 		return fmt.Errorf("邀请校验失败，请对方重新发送本次邀请 · %w", err)
 	}
+	if st, statusErr := active.Status(ctx, t.KeyPath); statusErr == nil {
+		if st.Role == "control" && st.Exchange != "" {
+			answer, err := grant.Read(st.Exchange)
+			if err != nil {
+				return err
+			}
+			if answer.VerifyAnswer(offer, time.Now()) == nil {
+				return t.controlPanel(ctx, st, isTicketText(invitation), st.Phase != "waiting")
+			}
+		}
+		return grant.ErrInUse
+	} else if !errors.Is(statusErr, active.ErrInactive) {
+		return statusErr
+	}
 	t.notice("32", "✓", fmt.Sprintf("邀请签名已核验，有效至 %s。", offer.Deadline().Local().Format("15:04:05")))
-	showDeviceName(t.out, "被控设备", offer.Claims.DeviceName)
+	showPeerIdentity(t.out, "被控设备", t.KeyPath, offer.Claims.Issuer, offer.Claims.DeviceName)
 	suggested := offer.Claims.SSHUser
 	if len(offer.Claims.SSHHostKey) > 0 && validSSHUser(suggested) {
 		fmt.Fprintf(t.out, "回车使用本次授权登录 %s，输入 /ssh 可改用已有的 SSH 凭据。\n", suggested)
@@ -175,6 +188,7 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 		if err != nil {
 			return err
 		}
+		_ = grant.RecordPeer(t.KeyPath, peer, offer.Claims.DeviceName, time.Now())
 		return t.waitControl(ctx, st, isTicketText(invitation))
 	}
 	exe, err := os.Executable()
@@ -186,7 +200,7 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 		return err
 	}
 	defer func() { result = errors.Join(result, os.RemoveAll(dir)) }()
-	h := handoff{Key: t.KeyPath, Peer: peer, Offer: filepath.Join(dir, "received.offer"), Answer: filepath.Join(dir, "session.answer"), STUN: t.STUN, Text: isTicketText(invitation), Copy: t.autoCopy}
+	h := handoff{Key: t.KeyPath, Peer: peer, Offer: filepath.Join(dir, "received.offer"), Answer: filepath.Join(dir, "session.answer"), STUN: t.STUN, Text: isTicketText(invitation), Copy: t.autoCopy, Interactive: t.interactive}
 	if err = offer.WriteNew(h.Offer); err != nil {
 		return err
 	}
@@ -212,7 +226,7 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	if err = t.nativeSSH(func() error { return h.runSSH(cmd) }); err != nil {
 		return fmt.Errorf("SSH 连接结束: %w", err)
 	}
-	if t.fullScreen {
+	if t.terminalUI() {
 		return errBack
 	}
 	fmt.Fprintln(t.out, "控制会话已结束。")

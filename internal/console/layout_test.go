@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,7 +11,24 @@ import (
 	"peertty/internal/active"
 )
 
+func TestTerminalPagesShareLayoutWithoutCursorControls(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	v := newTerminalView(80, 24, false)
+	s := active.State{ID: "current", Role: "control", Phase: "waiting", Exchange: "session.answer"}
+	for _, page := range []menuPage{homePage, helpPage, statusPage} {
+		var full, linear bytes.Buffer
+		c := Console{out: &full, fullScreen: true, section: "菜单"}
+		c.drawMenu(v, page, s, nil)
+		c.out, c.fullScreen = &linear, false
+		c.drawMenu(v, page, s, nil)
+		if linear.String() != ansi.Strip(full.String()) {
+			t.Fatalf("different content in full-screen and plain terminals on page %d", page)
+		}
+	}
+}
+
 func TestMenuColorsMatchTerminalCapabilities(t *testing.T) {
+	t.Setenv("WT_SESSION", "")
 	for _, tc := range []struct{ term, colors, fill string }{
 		{"xterm", "", "1;30;106"}, {"xterm-256color", "", "1;38;5;16;48;5;86"},
 		{"xterm-256color", "truecolor", "1;38;2;15;15;16;48;2;92;243;198"},
@@ -29,8 +47,66 @@ func TestMenuColorsMatchTerminalCapabilities(t *testing.T) {
 	}
 }
 
+func TestBrandIconKeepsSmallWindowsAndTransparentCutouts(t *testing.T) {
+	// Two square pixels fit vertically in one terminal cell. Spaces should
+	// show the actual terminal background, including inside the chevron.
+	want := []string{
+		"      ##########",
+		"      #        #",
+		"      #        #",
+		"      #        #",
+		"      #  ####  #",
+		"      #        #",
+		"#########      #",
+		"###  ####      #",
+		"####  ##########",
+		"#####  ##       ",
+		"####  ###       ",
+		"###  ####       ",
+		"#########       ",
+		"#########       ",
+	}
+	halves := [...]*strings.Replacer{
+		strings.NewReplacer("█", "#", "▀", "#", "▄", " "),
+		strings.NewReplacer("█", "#", "▀", " ", "▄", "#"),
+	}
+	for _, size := range [][2]int{{80, 24}, {120, 30}, {180, 60}} {
+		v := newTerminalView(size[0], size[1], false)
+		mono := v.brandIcon()
+		if len(mono) != 7 {
+			t.Errorf("%dx%d icon has %d rows, want 7", size[0], size[1], len(mono))
+			continue
+		}
+		v.color = true
+		colored := v.brandIcon()
+		if len(colored) != len(mono) {
+			t.Fatalf("colored icon has %d rows, want %d", len(colored), len(mono))
+		}
+		for y, row := range mono {
+			if ansi.StringWidth(row) != 16 {
+				t.Fatalf("row %d has %d cells, want 16", y, ansi.StringWidth(row))
+			}
+			for half, blocks := range halves {
+				pixels := blocks.Replace(row)
+				if pixels != want[y*2+half] {
+					t.Errorf("pixel row %d: %q, want %q", y*2+half, pixels, want[y*2+half])
+				}
+			}
+			// Only the front window receives a foreground colour.
+			expectColor := row
+			if y >= 3 {
+				cells := []rune(row)
+				expectColor = "\x1b[36m" + string(cells[:9]) + "\x1b[0m" + string(cells[9:])
+			}
+			if colored[y] != expectColor {
+				t.Errorf("unexpected icon color or background in row %d: %q", y, colored[y])
+			}
+		}
+	}
+}
+
 func TestMenuFitsTerminal(t *testing.T) {
-	for _, size := range [][2]int{{36, 12}, {38, 18}, {40, 20}, {52, 14}, {60, 21}, {71, 18}, {84, 21}, {120, 36}} {
+	for _, size := range [][2]int{{36, 12}, {38, 18}, {40, 20}, {46, 24}, {52, 14}, {60, 21}, {71, 18}, {80, 24}, {84, 21}, {120, 30}, {120, 36}} {
 		for _, color := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%dx%d/color=%t", size[0], size[1], color), func(t *testing.T) {
 				v := newTerminalView(size[0], size[1], color)
@@ -56,10 +132,10 @@ func TestMenuFitsTerminal(t *testing.T) {
 				}
 				home := check("home", v.home("0.3.1+test", 2222, active.State{}, active.ErrInactive)+v.commandPrompt(true, false))
 				words := []string{"点对点远程终端", "待配对", "/connect", "/host", "v0.3.1+test"}
-				if v.width >= 35 && v.height >= 18 {
-					words = append(words, "┏━━━━━┓", "┃  ━━ ┃", "┗━━━┛", "2222")
+				if v.width >= 38 && v.height >= 21 {
+					words = append(words, "2222")
 				} else {
-					words = append(words, "❯_ PeerTTY")
+					words = append(words, "▄▀ PeerTTY")
 				}
 				for _, word := range words {
 					if !strings.Contains(home, word) {
@@ -72,7 +148,7 @@ func TestMenuFitsTerminal(t *testing.T) {
 					}
 				}
 				help := check("help", v.heading("全部操作")+v.help()+v.commandPrompt(false, false))
-				if !strings.Contains(help, "❯_ PeerTTY") {
+				if !strings.Contains(help, "▄▀ PeerTTY") {
 					t.Error("help missing compact brand")
 				}
 				for _, group := range helpGroups {

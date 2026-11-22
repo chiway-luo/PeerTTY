@@ -3,6 +3,7 @@ package localssh
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,7 +26,7 @@ const startupTimeout = 10 * time.Second
 type Conn struct {
 	*net.TCPConn
 	guard *guard
-	input *bufio.Reader
+	input io.Reader
 }
 
 func (c *Conn) Temporary() bool { return c.guard != nil }
@@ -208,13 +209,13 @@ func attach(ctx context.Context, addr string, cmd *exec.Cmd) (_ *Conn, result er
 		return nil, err
 	}
 	// Do not report a successful cold start until native OpenSSH identifies
-	// itself. Peek keeps its identification intact for the real SSH client.
+	// itself. Buffer any RFC 4253 preamble and identification bytes intact for
+	// the real SSH client.
 	until, _ := start.Deadline()
 	_ = c.SetReadDeadline(until)
 	stop := context.AfterFunc(start, func() { c.Close() })
-	inputBuffer := bufio.NewReader(c)
-	header, err := inputBuffer.Peek(len("SSH-2.0-"))
-	if !stop() || err != nil || string(header) != "SSH-2.0-" {
+	inputBuffer, err := readSSHBannerReplay(c, until)
+	if !stop() || err != nil {
 		c.Close()
 		return nil, fmt.Errorf("临时 OpenSSH 未能完成启动握手 (%v)", err)
 	}
@@ -223,6 +224,33 @@ func attach(ctx context.Context, addr string, cmd *exec.Cmd) (_ *Conn, result er
 		return nil, err
 	}
 	return &Conn{TCPConn: c, guard: g, input: inputBuffer}, nil
+}
+
+func readSSHBannerReplay(c *net.TCPConn, deadline time.Time) (io.Reader, error) {
+	reader := bufio.NewReader(c)
+	var replay bytes.Buffer
+	const maxBannerBytes = 8192
+	for replay.Len() < maxBannerBytes {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			replay.Write(line)
+			if bytes.HasPrefix(line, []byte("SSH-")) {
+				if bytes.HasPrefix(line, []byte("SSH-2.0-")) || bytes.HasPrefix(line, []byte("SSH-1.99-")) {
+					return io.MultiReader(&replay, reader), nil
+				}
+				return nil, errors.New("unsupported SSH protocol banner")
+			}
+			// A real server sending RFC 4253 preamble emits the SSH-2.0 line immediately.
+			short := time.Now().Add(500 * time.Millisecond)
+			if short.Before(deadline) {
+				_ = c.SetReadDeadline(short)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("missing SSH identification banner")
 }
 
 // Serve runs in a dedicated local process. Closing the parent's private pipe

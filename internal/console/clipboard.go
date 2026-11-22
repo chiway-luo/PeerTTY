@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -20,8 +19,12 @@ func clipboardChoice(s string) bool {
 	return strings.EqualFold(s, "p") || s == "/paste"
 }
 
-func shareTicket(ctx context.Context, out io.Writer, kind string, ticket grant.Ticket, copyOn, show bool) error {
-	return shareTicketWith(ctx, out, kind, ticket, copyOn, show, copyTicket)
+func (t *Console) shareTicket(ctx context.Context, kind string, ticket grant.Ticket, copyOn, show bool) error {
+	copy := t.copyToClipboard
+	if copy == nil {
+		copy = copyTicket
+	}
+	return shareTicketWith(ctx, t.pageOut(), kind, ticket, copyOn, show, copy)
 }
 
 func shareTicketWith(ctx context.Context, out io.Writer, kind string, ticket grant.Ticket, copyOn, show bool, copy func(context.Context, io.Writer, grant.Ticket) (string, error)) error {
@@ -52,7 +55,7 @@ func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
 		}
 		return exec.CommandContext(ctx, "/usr/bin/pbpaste", "-Prefer", "txt"), nil
 	case "windows":
-		exe := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+		exe := windowsPowerShellPath()
 		script := "[Console]::Write((Get-Clipboard -Raw -ErrorAction Stop))"
 		if write {
 			script = "Set-Clipboard -Value ([Console]::In.ReadToEnd()) -ErrorAction Stop"
@@ -94,6 +97,16 @@ func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
 type clipboardLookup func(context.Context, bool) (*exec.Cmd, error)
 
 func copyTicket(parent context.Context, out io.Writer, ticket grant.Ticket) (string, error) {
+	var b strings.Builder
+	if err := writeTicketText(&b, ticket); err != nil {
+		return "", err
+	}
+	if handled, err := nativeWriteClipboard(b.String()); handled {
+		if err == nil {
+			return "已复制到系统剪贴板。", nil
+		}
+		return "", fmt.Errorf("无法复制凭证 · %w", err)
+	}
 	return copyTicketWith(parent, out, ticket, clipboardCommand)
 }
 
@@ -121,6 +134,22 @@ func copyTicketWith(parent context.Context, out io.Writer, ticket grant.Ticket, 
 
 // Clipboard import only happens on request. Treat its contents as data.
 func ticketInput(ctx context.Context, s string) (string, error) {
+	if !clipboardChoice(s) {
+		return s, nil
+	}
+	if text, handled, err := nativeReadClipboard(); handled {
+		if err != nil {
+			if errors.Is(err, oversizePaste) {
+				return "", oversizePaste
+			}
+			return "", errors.New("无法读取系统剪贴板，请直接粘贴整段文本并回车")
+		}
+		value, err := pastedValue(text)
+		if err == nil && !isTicketText(value) {
+			return "", errors.New("剪贴板里没有完整的 PeerTTY 邀请或回执")
+		}
+		return value, err
+	}
 	return ticketInputWith(ctx, s, clipboardCommand)
 }
 

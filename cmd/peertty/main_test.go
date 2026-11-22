@@ -110,6 +110,12 @@ func TestInactiveCLICommands(t *testing.T) {
 	if !errors.Is(err, active.ErrInactive) || out != "" {
 		t.Fatalf("inactive revoke: %q, %v", out, err)
 	}
+	if _, err := commandOutput(t, "cp", "-state-dir", state, ":/a", "./a"); !errors.Is(err, active.ErrInactive) {
+		t.Fatalf("inactive cp: %v", err)
+	}
+	if _, err := commandOutput(t, "sftp", "-state-dir", state); !errors.Is(err, active.ErrInactive) {
+		t.Fatalf("inactive sftp: %v", err)
+	}
 }
 
 func TestApprovalInput(t *testing.T) {

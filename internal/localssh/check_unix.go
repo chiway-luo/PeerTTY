@@ -15,7 +15,7 @@ import (
 	"syscall"
 )
 
-func systemClient() (string, error) { return exec.LookPath("/usr/bin/ssh") }
+func systemTool(name string) (string, error) { return exec.LookPath(filepath.Join("/usr/bin", name)) }
 
 func adminAction(message, label, path string, args ...string) Check {
 	if os.Geteuid() != 0 {

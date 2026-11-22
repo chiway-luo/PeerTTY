@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/charmbracelet/x/ansi v0.11.10
+	github.com/mattn/go-isatty v0.0.20
 	github.com/pion/datachannel v1.6.4
 	github.com/pion/ice/v4 v4.4.9
 	github.com/pion/stun/v4 v4.0.1

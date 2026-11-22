@@ -39,6 +39,8 @@ type worker struct {
 	offer    grant.Ticket
 	approval chan grant.Ticket
 	peer     *transport.Peer
+	linkCtx  context.Context
+	endLinks context.CancelFunc
 	login    *localssh.Login
 	openSSH  sync.Mutex
 	links    sync.WaitGroup
@@ -123,6 +125,8 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	if started == os.Stdout {
 		_ = os.Stdout.Close()
 	}
+	clearLastError(opts.Key)
+	logWorkerEvent(w.state.ID, fmt.Sprintf("start role=%s deadline=%s", opts.Role, deadline.Format(time.RFC3339)))
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
@@ -136,19 +140,18 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	}()
 	err = w.run(ctx)
 	if err != nil && ctx.Err() == nil {
-		keep := 3 * time.Second
-		if w.snapshot().Route != "" {
-			keep = time.Until(deadline)
-		}
+		logWorkerEvent(w.state.ID, "offline: "+err.Error())
+		writeLastError(opts.Key, err.Error())
 		w.update(func(s *State) { s.Phase = "offline"; s.Note = err.Error() })
-		// Preserve a readable failure while attached menus report it. A
-		// failed negotiation releases the role instead of trapping a new grant.
-		timer := time.NewTimer(keep)
+		// Allow menus to read the reason, then release the identity for pairing.
+		timer := time.NewTimer(3 * time.Second)
 		select {
 		case <-ctx.Done():
 		case <-timer.C:
 		}
 		timer.Stop()
+	} else {
+		logWorkerEvent(w.state.ID, "ended")
 	}
 	w.mu.Lock()
 	w.stopping = true
@@ -178,12 +181,24 @@ func (w *worker) snapshot() State {
 	return s
 }
 
+// SSH streams share a lifetime within the grant. After a sustained outage,
+// close those streams but keep the signed peer available for a new window.
+func (w *worker) resetLinks(parent context.Context) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.endLinks != nil {
+		w.endLinks()
+	}
+	w.linkCtx, w.endLinks = context.WithCancel(parent)
+}
+
 func (w *worker) run(ctx context.Context) error {
 	p, err := transport.NewGrant(ctx, w.STUN)
 	if err != nil {
 		return err
 	}
 	defer p.Close()
+	w.resetLinks(p.Context())
 	var ticket grant.Ticket
 	var loginKey ed25519.PublicKey
 	var answerSDP string
@@ -235,7 +250,12 @@ func (w *worker) run(ctx context.Context) error {
 				return err
 			}
 		}
-		p.OnLink(func(stream datachannel.ReadWriteCloserDeadliner) { w.serveSSH(p.Context(), stream, len(loginKey) > 0) })
+		p.OnLink(func(stream datachannel.ReadWriteCloserDeadliner) {
+			w.mu.Lock()
+			link := w.linkCtx
+			w.mu.Unlock()
+			w.serveSSH(link, stream, len(loginKey) > 0)
+		})
 		if err = p.Accept(answer.Claims.SDP); err != nil {
 			return err
 		}
@@ -297,6 +317,7 @@ func (w *worker) run(ctx context.Context) error {
 	w.state.Phase = "ready"
 	w.state.Route = route
 	w.mu.Unlock()
+	logWorkerEvent(w.state.ID, "connected route="+route)
 	// This first stream belongs to the grant. Individual SSH windows use
 	// separate streams and can close without ending the approved connection.
 	remoteClosed := make(chan error, 1)
@@ -306,6 +327,7 @@ func (w *worker) run(ctx context.Context) error {
 		if err == nil {
 			switch {
 			case text && string(buf[:n]) == "REVOKE":
+				logWorkerEvent(w.state.ID, "remote peer revoked grant")
 				_ = control.SetWriteDeadline(time.Now().Add(2 * time.Second))
 				_, _ = control.WriteDataChannel([]byte("CLOSED"), true)
 			case text && string(buf[:n]) == "CLOSED" && ctx.Err() != nil:
@@ -318,18 +340,19 @@ func (w *worker) run(ctx context.Context) error {
 		}
 		remoteClosed <- err
 	}()
-	select {
-	case <-ctx.Done():
-	case <-p.Context().Done():
-		if ctx.Err() == nil {
-			select {
-			case err := <-remoteClosed:
-				return err
-			case <-time.After(250 * time.Millisecond):
-				return context.Cause(p.Context())
+	err = waitForGrantEndWithNotice(ctx, p.Context(), p.Connected, remoteClosed, func() {
+		logWorkerEvent(w.state.ID, "route lost for 15s; closing stalled SSH streams")
+		w.resetLinks(p.Context())
+	}, func(prolonged bool) {
+		w.update(func(s *State) {
+			if prolonged {
+				s.Note = prolongedOutageText
+			} else if s.Note == prolongedOutageText {
+				s.Note = ""
 			}
-		}
-	case err := <-remoteClosed:
+		})
+	})
+	if ctx.Err() == nil {
 		return err
 	}
 	_ = control.SetWriteDeadline(time.Now().Add(time.Second))
@@ -340,6 +363,65 @@ func (w *worker) run(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
+}
+
+const (
+	routeRecoveryWindow   = 15 * time.Second
+	prolongedOutageWindow = 60 * time.Second
+	prolongedOutageText   = "网络已持续中断超过 1 分钟；如已切换网络或出口 IP 变化，原直连无法自动恢复，请运行 /revoke 撤销并重新配对。"
+)
+
+// Give live terminals a short recovery window, independently of the grant's
+// signed deadline and the time a person needs to approve the receipt.
+func waitForGrantEnd(ctx, peer context.Context, connected func() bool, remoteClosed <-chan error, closeStalled func()) error {
+	return waitForGrantEndWithNotice(ctx, peer, connected, remoteClosed, closeStalled, nil)
+}
+
+func waitForGrantEndWithNotice(ctx, peer context.Context, connected func() bool, remoteClosed <-chan error, closeStalled func(), onProlonged func(bool)) error {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	var lostAt time.Time
+	var stalled, warned bool
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-peer.Done():
+			select {
+			case err := <-remoteClosed:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+				return context.Cause(peer)
+			}
+		case err := <-remoteClosed:
+			return err
+		case now := <-tick.C:
+			if connected() {
+				if warned && onProlonged != nil {
+					onProlonged(false)
+				}
+				lostAt = time.Time{}
+				stalled = false
+				warned = false
+			} else if lostAt.IsZero() {
+				lostAt = now
+			} else {
+				elapsed := now.Sub(lostAt)
+				if !stalled && elapsed >= routeRecoveryWindow {
+					closeStalled()
+					stalled = true
+				}
+				if !warned && elapsed >= prolongedOutageWindow {
+					warned = true
+					if onProlonged != nil {
+						onProlonged(true)
+					}
+				}
+			}
+		}
+	}
 }
 
 func (w *worker) enter() bool {
@@ -392,6 +474,7 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 	w.mu.Lock()
 	s := w.state
 	p := w.peer
+	link := w.linkCtx
 	var err error
 	if req.Op != "status" && (req.ID != s.ID || w.stopping || ctx.Err() != nil) {
 		err = errors.New("本次授权已结束")
@@ -434,7 +517,7 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 	}
 	defer w.leave()
 	_ = c.SetDeadline(time.Now().Add(40 * time.Second))
-	open, stop := context.WithTimeout(ctx, 30*time.Second)
+	open, stop := context.WithTimeout(link, 30*time.Second)
 	defer stop()
 	stream, err := p.OpenLink(open)
 	if err != nil {
@@ -446,5 +529,5 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		return
 	}
 	_ = c.SetDeadline(time.Time{})
-	_ = bridge.Run(p.Context(), stream, c)
+	_ = bridge.Run(link, stream, c)
 }

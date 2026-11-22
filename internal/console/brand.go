@@ -5,38 +5,57 @@ import (
 	"strings"
 )
 
-// The compact mark uses the two prompts from assets/peertty-icon.png.
+// Two offset square blocks keep the window motif in single-line headings.
 func (v terminalView) compactMark() string {
-	return v.accent("❯") + v.bold("_")
+	return v.accent("▄") + v.bold("▀")
 }
 
-// Use the icon's mint and graphite for filled controls. Ordinary text retains
-// the terminal theme's foreground for contrast on both light and dark screens.
-func brandColors() (edge, fill string) {
+func terminalPalette() int {
 	switch strings.ToLower(os.Getenv("COLORTERM")) {
 	case "truecolor", "24bit":
-		return "38;2;92;243;198", "1;38;2;15;15;16;48;2;92;243;198"
+		return 1 << 24
+	}
+	if os.Getenv("WT_SESSION") != "" {
+		return 1 << 24
 	}
 	if strings.Contains(os.Getenv("TERM"), "256color") {
-		return "38;5;86", "1;38;5;16;48;5;86"
+		return 256
 	}
-	return "96", "1;30;106"
+	return 16
 }
 
-// Keep the corners of the offset panes on terminal cell boundaries.
-func (v terminalView) brandIcon() [5]string {
-	edge, fill := brandColors()
-	top, front, bottom := "▗▄▄▄▄", "█  ❯  █", "▝▀▀▀▀▀▘"
-	if v.color {
-		top = v.ink(edge, "▗") + v.ink(fill, "    ")
-		front = v.ink(fill, "   ❯   ")
-		bottom = v.ink(edge, "▝") + v.ink(fill, "     ") + v.ink(edge, "▘")
+func brandFill() string {
+	switch terminalPalette() {
+	case 16:
+		return "1;30;106"
+	case 256:
+		return "1;38;5;16;48;5;86"
+	default:
+		return "1;38;2;15;15;16;48;2;92;243;198"
 	}
-	return [5]string{
-		"     " + v.bold("┏━━━━━┓"),
-		"     " + v.bold("┃  ━━ ┃"),
-		top + v.bold("┗━┓   ┃"),
-		front + v.bold("┗━━━┛"),
-		bottom,
+}
+
+// Each block half is one square pixel. The left window is in front of the
+// outlined window. Its arrow and every empty cell show the terminal background.
+var terminalWindows = [...]struct{ front, rear string }{
+	{"", "      █▀▀▀▀▀▀▀▀█"},
+	{"", "      █        █"},
+	{"", "      █  ▀▀▀▀  █"},
+	{"███▀▀████", "      █"},
+	{"████▄ ▀██", "▀▀▀▀▀▀▀"},
+	{"███▀ ▄███", ""},
+	{"█████████", ""},
+}
+
+func (v terminalView) brandIcon() []string {
+	if v.width < 38 || v.height < 21 {
+		return nil
 	}
+	rows := make([]string, len(terminalWindows))
+	for i, line := range terminalWindows {
+		// Both inks follow the terminal theme, including light and monochrome
+		// palettes. Apply colour only to the filled pixels of the front pane.
+		rows[i] = padCells(v.ink("36", line.front)+line.rear, 16)
+	}
+	return rows
 }

@@ -8,11 +8,162 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"peertty/internal/grant"
 )
+
+func TestEstablishedGrantBoundsConsecutiveRouteLoss(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var online atomic.Bool
+		online.Store(true)
+		w := &worker{}
+		w.resetLinks(t.Context())
+		first := w.linkCtx
+		remote := make(chan error, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- waitForGrantEnd(t.Context(), t.Context(), online.Load, remote, func() { w.resetLinks(t.Context()) })
+		}()
+		time.Sleep(time.Hour)
+		online.Store(false)
+		time.Sleep(10 * time.Second)
+		online.Store(true)
+		time.Sleep(2 * time.Second)
+		online.Store(false)
+		time.Sleep(10 * time.Second)
+		if first.Err() != nil {
+			t.Fatal("recovered outage counted against next outage")
+		}
+		time.Sleep(routeRecoveryWindow - 10*time.Second + 2*time.Second)
+		synctest.Wait()
+		if first.Err() == nil || w.linkCtx.Err() != nil {
+			t.Fatal("stalled SSH window was not released independently of the grant")
+		}
+		next := w.linkCtx
+		time.Sleep(time.Minute)
+		online.Store(true)
+		time.Sleep(2 * time.Second)
+		if next.Err() != nil {
+			t.Fatal("a recovered grant lost the lifetime for its new streams")
+		}
+		remote <- nil
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestProlongedOutageUpdatesAndClearsNotice(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var online atomic.Bool
+		online.Store(true)
+		var warned atomic.Bool
+		remote := make(chan error, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- waitForGrantEndWithNotice(t.Context(), t.Context(), online.Load, remote, func() {}, func(p bool) {
+				warned.Store(p)
+			})
+		}()
+		online.Store(false)
+		time.Sleep(prolongedOutageWindow + 2*time.Second)
+		synctest.Wait()
+		if !warned.Load() {
+			t.Fatal("expected prolonged outage notice after 60s")
+		}
+		online.Store(true)
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if warned.Load() {
+			t.Fatal("prolonged outage notice did not clear on recovery")
+		}
+		remote <- nil
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestCachedLocalTLSAndLastError(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "device.key")
+	if _, err := grant.NewIdentity(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	c1, err := cachedLocalTLS(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := cachedLocalTLS(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(c1.Certificates[0].Certificate[0], c2.Certificates[0].Certificate[0]) {
+		t.Fatal("expected cached certificate reuse for unchanged key")
+	}
+	// Replace key on disk and confirm cache invalidates immediately.
+	other := filepath.Join(dir, "other.key")
+	if _, err := grant.NewIdentity(other); err != nil {
+		t.Fatal(err)
+	}
+	rawOther, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, rawOther, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := cachedLocalTLS(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(c1.Certificates[0].Certificate[0], c3.Certificates[0].Certificate[0]) {
+		t.Fatal("cache did not invalidate after key replacement")
+	}
+
+	if _, _, ok := LastError(keyPath); ok {
+		t.Fatal("unexpected last error before write")
+	}
+	writeLastError(keyPath, "STUN 探测超时")
+	reason, at, ok := LastError(keyPath)
+	if !ok || reason != "STUN 探测超时" || at.IsZero() {
+		t.Fatalf("LastError = (%q, %v, %v)", reason, at, ok)
+	}
+	clearLastError(keyPath)
+	if _, _, ok := LastError(keyPath); ok {
+		t.Fatal("clearLastError did not remove record")
+	}
+	// Stale (>15m) or malformed error records are ignored.
+	stale := `{"error":"old","at":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) + `"}`
+	if err := os.WriteFile(keyPath+".last-error", []byte(stale), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := LastError(keyPath); ok {
+		t.Fatal("stale last error was returned")
+	}
+	if LogPath("relative.key") != "" || lastErrorPath("relative.key") != "" {
+		t.Fatal("relative key path produced a log path")
+	}
+	// Worker log opens cleanly and truncates when exceeding maxWorkerLogSize.
+	logPath := LogPath(keyPath)
+	if err := os.WriteFile(logPath, bytes.Repeat([]byte("x"), maxWorkerLogSize+100), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := openWorkerLog(keyPath)
+	if f == nil {
+		t.Fatal("openWorkerLog returned nil")
+	}
+	_, _ = f.WriteString("fresh line\n")
+	_ = f.Close()
+	data, err := os.ReadFile(logPath)
+	if err != nil || string(data) != "fresh line\n" {
+		t.Fatalf("expected truncated log, got len=%d err=%v", len(data), err)
+	}
+}
 
 func TestLocalClientsShareOnlyApprovedPeer(t *testing.T) {
 	if testing.Short() {

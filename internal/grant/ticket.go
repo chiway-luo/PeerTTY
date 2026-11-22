@@ -95,23 +95,23 @@ func signingBytes(c Claims) ([]byte, error) {
 	switch c.Version {
 	case targetedVersion, pairingVersion:
 		if len(c.SSHHostKey) != 0 || len(c.SSHLoginKey) != 0 {
-			return nil, errors.New("unexpected SSH session key on a legacy ticket")
+			return nil, errors.New("旧版凭证不应包含会话 SSH 公钥")
 		}
 	case loginVersion:
 		switch c.Kind {
 		case "offer":
 			if (len(c.SSHHostKey) != 0 && (c.SSHUser == "" || len(c.SSHHostKey) != ed25519.PublicKeySize)) || len(c.SSHLoginKey) != 0 {
-				return nil, errors.New("invalid signed SSH account or host key")
+				return nil, errors.New("邀请中的 SSH 账号或主机公钥无效")
 			}
 		case "answer":
 			if len(c.SSHHostKey) != 0 || c.SSHUser != "" || (len(c.SSHLoginKey) != 0 && len(c.SSHLoginKey) != ed25519.PublicKeySize) {
-				return nil, errors.New("invalid signed SSH login key")
+				return nil, errors.New("回执中的 SSH 登录公钥无效")
 			}
 		default:
-			return nil, errors.New("unknown ticket kind")
+			return nil, errors.New("未知的凭证类型")
 		}
 	default:
-		return nil, errors.New("unsupported PeerTTY ticket version")
+		return nil, errors.New("不支持的 PeerTTY 凭证版本")
 	}
 	data, err := json.Marshal(c)
 	return append([]byte(fmt.Sprintf("PeerTTY signed session v%d\x00", c.Version)), data...), err
@@ -124,10 +124,10 @@ func (t Ticket) digest() string {
 
 func (t Ticket) VerifyOffer(host, operator string, now time.Time) error {
 	if t.Claims.OfferDigest != "" {
-		return errors.New("unexpected parent in offer")
+		return errors.New("邀请中不应包含上级摘要")
 	}
 	if !ValidFingerprint(host) || !ValidFingerprint(operator) {
-		return errors.New("invalid device identity")
+		return errors.New("设备指纹格式无效")
 	}
 	if t.Claims.Version == pairingVersion || t.Claims.Version == loginVersion {
 		if host == operator {
@@ -140,13 +140,13 @@ func (t Ticket) VerifyOffer(host, operator string, now time.Time) error {
 
 func (t Ticket) VerifyAnswer(offer Ticket, now time.Time) error {
 	if offer.Claims.Kind != "offer" || t.Claims.Version != offer.Claims.Version {
-		return errors.New("answer does not match the invitation type or version")
+		return errors.New("回执类型或版本与当前邀请不匹配")
 	}
 	host, operator := Fingerprint(offer.Claims.Issuer), offer.Claims.Recipient
 	if offer.Claims.Version == pairingVersion || offer.Claims.Version == loginVersion {
 		operator = Fingerprint(t.Claims.Issuer)
 		if offer.Claims.Recipient != "" || operator == host {
-			return errors.New("invalid controller for this invitation")
+			return errors.New("此回执的控制端身份无效")
 		}
 	}
 	if err := t.verify("answer", operator, host, now); err != nil {
@@ -154,10 +154,10 @@ func (t Ticket) VerifyAnswer(offer Ticket, now time.Time) error {
 	}
 	c := t.Claims
 	if len(c.SSHLoginKey) > 0 && len(offer.Claims.SSHHostKey) == 0 {
-		return errors.New("this invitation does not offer account login")
+		return errors.New("当前邀请未启用临时账号公钥登录")
 	}
 	if c.Session != offer.Claims.Session || c.ExpiresMS != offer.Claims.ExpiresMS || c.OfferDigest != offer.digest() {
-		return errors.New("answer belongs to a different offer")
+		return errors.New("该回执不属于当前邀请")
 	}
 	return nil
 }
@@ -165,25 +165,28 @@ func (t Ticket) VerifyAnswer(offer Ticket, now time.Time) error {
 func (t Ticket) verify(kind, sender, recipient string, now time.Time) error {
 	c := t.Claims
 	if c.Kind != kind {
-		return fmt.Errorf("expected a supported PeerTTY %s", kind)
+		if kind == "offer" {
+			return errors.New("需要的是一份 PeerTTY 邀请，而不是回执")
+		}
+		return errors.New("需要的是一份 PeerTTY 回执，而不是邀请")
 	}
 	if len(c.Issuer) != ed25519.PublicKeySize || Fingerprint(c.Issuer) != sender || c.Recipient != recipient {
-		return errors.New("unexpected sender or recipient fingerprint")
+		return errors.New("发送方或接收方设备指纹不匹配")
 	}
 	nonce, err := hex.DecodeString(c.Session)
 	if err != nil || len(nonce) != 32 || len(c.SDP) == 0 {
-		return errors.New("invalid session or empty connection description")
+		return errors.New("会话编号无效或缺少连接地址描述")
 	}
 	payload, err := signingBytes(c)
 	if err != nil {
 		return err
 	}
 	if !ed25519.Verify(c.Issuer, payload, t.Signature) {
-		return errors.New("invalid session signature")
+		return errors.New("凭证签名校验失败，内容可能被篡改或复制不完整")
 	}
 	life := t.Deadline().Sub(now)
 	if life <= 0 || life > MaxTTL+time.Minute {
-		return errors.New("session expired or expiration outside permitted window")
+		return errors.New("凭证已过期或有效期超出允许范围")
 	}
 	return nil
 }

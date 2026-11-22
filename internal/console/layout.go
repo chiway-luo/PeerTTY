@@ -15,6 +15,7 @@ type terminalView struct {
 	width, height int
 	margin        string
 	color         bool
+	linear        bool
 }
 
 func newTerminalView(columns, rows int, color bool) terminalView {
@@ -33,9 +34,19 @@ func (t *Console) view() terminalView {
 	if f, ok := t.out.(*os.File); ok {
 		if w, h, err := term.GetSize(int(f.Fd())); err == nil && w > 0 && h > 0 {
 			columns, rows = w, h
+		} else if t.interactive {
+			// Pipe-backed PTYs can expose their dimensions through the shell.
+			if n, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && n > 0 && n <= 65535 {
+				columns = n
+			}
+			if n, err := strconv.Atoi(os.Getenv("LINES")); err == nil && n > 0 && n <= 65535 {
+				rows = n
+			}
 		}
 	}
-	return newTerminalView(columns, rows, t.fullScreen && os.Getenv("NO_COLOR") == "")
+	v := newTerminalView(columns, rows, t.fullScreen && os.Getenv("NO_COLOR") == "")
+	v.linear = !t.fullScreen
+	return v
 }
 
 func (v terminalView) ink(sgr, text string) string {
@@ -53,8 +64,7 @@ func (v terminalView) key(text string) string {
 	if !v.color {
 		return "[" + text + "]"
 	}
-	_, fill := brandColors()
-	return v.ink(fill, " "+text+" ")
+	return v.ink(brandFill(), " "+text+" ")
 }
 
 func padCells(text string, width int) string {
@@ -69,7 +79,7 @@ func (v terminalView) rule(left, right string) string {
 
 func (v terminalView) heading(title string) string {
 	label := v.compactMark() + " " + v.accent("PeerTTY") + v.muted("  /  ") + v.bold(title) + "  "
-	if v.height < 18 {
+	if v.height <= 18 {
 		return v.rule(label, "") + "\n"
 	}
 	return v.rule(label, "") + "\n\n"
@@ -79,6 +89,9 @@ func (v terminalView) heading(title string) string {
 // when the footer makes the terminal scroll, without taking over line editing.
 func (v terminalView) composer(title, footer string) string {
 	marker := v.margin + v.accent("❯ ")
+	if v.linear {
+		return v.margin + title + "\n" + v.margin + footer + "\n" + marker
+	}
 	if v.height < 18 || v.width < 27 {
 		if ansi.StringWidth(title)+ansi.StringWidth(footer)+4 <= v.width {
 			return v.rule(title+"  ", "  "+footer) + "\n" + marker
@@ -139,22 +152,27 @@ func (v terminalView) hero(version, system string, port int, status string) stri
 	}
 	title := v.bold("点对点远程终端")
 	portLabel := "SSH 端口 " + strconv.Itoa(port)
-	if v.width >= 35 && v.height >= 18 {
+	if icon := v.brandIcon(); len(icon) > 0 {
 		top := v.rule(v.muted("╭"), v.muted("╮"))
 		bottom := v.rule(v.muted("╰"), v.muted("╯"))
-		labels := [5]string{"", v.accent("PeerTTY"), title, v.muted(version), ""}
-		details := [5]string{"", status, v.muted(padCells("本机", 10)) + system, v.muted(padCells("SSH 端口", 10)) + strconv.Itoa(port), ""}
+		labels := [3]string{v.accent("PeerTTY"), title, v.muted(version)}
+		details := [3]string{status, v.muted(padCells("本机", 10)) + system, v.muted(padCells("SSH 端口", 10)) + strconv.Itoa(port)}
 		wide := v.width >= 66
 		if !wide {
 			top = v.rule(v.muted("╭─ ")+ansi.Truncate(brand, v.width-6, "…")+" ", v.muted("─╮"))
 			bottom = v.rule(v.muted("╰─ ")+status+" ", v.muted("─╯"))
-			labels = [5]string{"", title, system, v.muted(portLabel), ""}
+			labels = [3]string{title, system, v.muted(portLabel)}
 		}
 		fmt.Fprintln(&b, top)
-		for i, line := range v.brandIcon() {
-			row := padCells(line, 14) + labels[i]
-			if wide && details[i] != "" {
-				row = padCells(row, (v.width-6)*3/5) + v.muted("│  ") + details[i]
+		firstLabel := (len(icon) - len(labels)) / 2
+		detailsColumn := max((v.width-6)*3/5, ansi.StringWidth(icon[0])+2+ansi.StringWidth(title)+1)
+		for i, line := range icon {
+			row := line
+			if n := i - firstLabel; n >= 0 && n < len(labels) {
+				row += "  " + labels[n]
+				if wide {
+					row = padCells(row, detailsColumn) + v.muted("│  ") + details[n]
+				}
 			}
 			b.WriteString(v.panelRow(row))
 		}
