@@ -14,7 +14,7 @@ func TestUnixSSHDiagnosticsOfferTheExpectedAction(t *testing.T) {
 		output, message string
 		action          bool
 	}{
-		{"sshd: no hostkeys available -- exiting.", "主机密钥", true},
+		{"sshd: no hostkeys available -- exiting.", "主机密钥", runtime.GOOS != "darwin"},
 		{"account is not in the sudoers file", "管理员权限", false},
 		{"user is not allowed to execute this command", "管理员权限", false},
 		{"unknown sshd_config setting", "配置未通过", false},

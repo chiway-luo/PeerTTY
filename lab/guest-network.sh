@@ -156,12 +156,68 @@ RULES
     echo "$profile $mode" > "$state/profile"
 }
 
+roam_prepare() {
+    [[ $(<"$state/profile") == "clean routed" ]]
+    ip -n "$gw" link add roamlan type veth peer name roam0 netns "$app"
+    ip -n "$gw" link set roamlan mtu 1400 up
+    ip -n "$gw" addr add "10.78.$side.1/24" dev roamlan
+    ip -n "$gw" addr add "198.18.1.$side/32" dev wan0
+    ip -n "$gw" route add "198.18.1.$other/32" via "$peer_wan"
+    ip netns exec "$gw" nft insert rule ip peertty forward iifname roamlan oifname wan0 accept
+    ip netns exec "$gw" nft insert rule ip peertty forward iifname wan0 oifname roamlan accept
+    # A different egress IP, with endpoint-independent inbound filtering for
+    # UDP ports that this endpoint actually used. The new LAN is not routed
+    # across the WAN. Count translated UDP packets on the wire.
+    ip netns exec "$gw" nft -f - <<RULES
+table ip peertty_roam {
+    set ports { type inet_service; flags dynamic,timeout; timeout 2m; }
+    counter translated {}
+    chain outbound { type filter hook forward priority mangle; iifname "roamlan" ip saddr != 10.78.$side.2 drop; iifname "roamlan" oifname "wan0" meta l4proto udp update @ports { udp sport timeout 2m }; }
+    chain post { type nat hook postrouting priority srcnat; oifname "wan0" ip saddr 10.78.$side.2 snat to 198.18.1.$side; }
+    chain pre { type nat hook prerouting priority dstnat; iifname "wan0" ip daddr 198.18.1.$side udp dport @ports dnat to 10.78.$side.2; }
+    chain observe { type filter hook postrouting priority 115; oifname "wan0" ip saddr 198.18.1.$side meta l4proto udp counter name translated; }
+}
+RULES
+}
+
+roam_cut() {
+    ip -n "$app" addr del "$lan.2/24" dev eth0
+    ip -n "$app" link set eth0 down
+}
+
+roam_join() {
+    ip -n "$app" link set roam0 mtu 1400 up
+    ip -n "$app" addr add "10.78.$side.2/24" dev roam0
+    ip -n "$app" route replace default via "10.78.$side.1" dev roam0
+}
+
+roam_restore() {
+    ip -n "$app" link set eth0 up
+    ip -n "$app" addr replace "$lan.2/24" dev eth0
+    ip -n "$app" route replace default via "$lan.1" dev eth0
+    if ip -n "$gw" link show roamlan >/dev/null 2>&1; then ip -n "$gw" link del roamlan; fi
+    if ip netns exec "$gw" nft list table ip peertty_roam >/dev/null 2>&1; then
+        ip netns exec "$gw" nft delete table ip peertty_roam
+    fi
+    if [[ -n $(ip -n "$gw" route show "198.18.1.$other/32") ]]; then
+        ip -n "$gw" route del "198.18.1.$other/32" via "$peer_wan"
+    fi
+    if [[ -n $(ip -n "$gw" -4 addr show dev wan0 to "198.18.1.$side/32") ]]; then
+        ip -n "$gw" addr del "198.18.1.$side/32" dev wan0
+    fi
+}
+
 case "$action" in
     setup)
         setup "$@"
         setup_observer
         ;;
     profile) apply_profile "$@" ;;
+    roam-prepare) roam_prepare ;;
+    roam-cut) roam_cut ;;
+    roam-join) roam_join ;;
+    roam-count) ip netns exec "$gw" nft list counter ip peertty_roam translated ;;
+    roam-restore) roam_restore ;;
     stun)
         server=/usr/local/lib/peertty-lab/stun-only-server
         [[ -x $server ]] || exit 0

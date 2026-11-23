@@ -1,6 +1,7 @@
 """Exercise the terminal menus through native SSH on the two lab machines."""
 from contextlib import ExitStack
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 from ssh_check import command, endpoint, stop
 
@@ -57,9 +59,29 @@ class Menu:
         block = self.expect(label + r"\r?\n(-----BEGIN PEERTTY TICKET-----\r?\n"
                             r"[A-Za-z0-9+/=\r\n]+-----END PEERTTY TICKET-----)\r?\n")[1]
         payload = "".join(block.splitlines()[1:-1])
-        if base64.b64decode(payload, validate=True).decode() != file_contents:
+        data = base64.b64decode(payload, validate=True)
+        if not data.lstrip().startswith(b"{"):
+            decoder = zlib.decompressobj()
+            data = decoder.decompress(data, 128 * 1024 + 1)
+            if len(data) > 128 * 1024 or not decoder.eof or decoder.unused_data:
+                raise RuntimeError("invalid compressed ticket in menu output")
+        if data != file_contents.encode():
             raise RuntimeError("displayed ticket differs from its signed file")
         return "\n".join(block.splitlines())
+
+    def expect_connected_terminals(self, role, count):
+        # A status page is a snapshot. Ask again while streams finish opening or closing.
+        deadline = time.monotonic() + 45
+        pattern = rf"已连接 · {role}[^❯]{{0,500}}?已连终端\s+(\d+)\r?\n"
+        while True:
+            self.send("/status")
+            match = self.expect(pattern, max(1, deadline - time.monotonic()))
+            observed = int(match[1])
+            if observed == count:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{role}: expected {count} connected terminals, observed {observed}")
+            time.sleep(1)
 
 
 def transfer(sender, source, receiver, dest):
@@ -213,7 +235,82 @@ def wait_near_expiry(expires_ms, timers, window):
     raise RuntimeError("second SSH terminal exited before the grant deadline")
 
 
-def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open", verify_sudo=False):
+def check_roaming(guest, windows, dirs, programs, offer, answer):
+    roles = ("device", "engineer")
+    keys = {r: f"{dirs[r]}/config/PeerTTY/device.key" for r in roles}
+
+    def leases():
+        return [(command(r, "cat", keys[r] + ".active"),
+                 command(r, "sha256sum", file).split()[0]) for r, file in zip(roles, (offer, answer))]
+
+    def addresses(role):
+        return [a["local"] for nic in json.loads(command(role, "ip", "-j", "-4", "addr"))
+                for a in nic["addr_info"] if a["scope"] == "global"]
+
+    def shell_pid(window):
+        window.send("printf 'ROAM_PID=%s\\n' \"$$\"")
+        return window.expect(r"\nROAM_PID=(\d+)\r?\n", 35)[1]
+
+    original = leases()
+    pids = [shell_pid(w) for w in windows]
+    if pids[0] == pids[1]:
+        raise RuntimeError("expected two independent SSH shells")
+    for role, new in zip(roles, ("10.78.2.2", "10.78.1.2")):
+        old = addresses(role)
+        if old != [LAN[role]]:
+            raise RuntimeError(f"unexpected original addresses on {role}: {old}")
+        guest(role, "roam-cut")
+        if addresses(role):
+            raise RuntimeError(f"{role} retained an alternate address before switching")
+        if role == "engineer":
+            # Exceed the established-stream timeout; both old shells must end.
+            time.sleep(26)
+        joined = time.monotonic()
+        guest(role, "roam-join")
+        if addresses(role) != [new] or "dev roam0" not in command(role, "ip", "route", "show", "default"):
+            raise RuntimeError(f"{role} did not switch to the new network")
+        if role == "device":
+            if [shell_pid(w) for w in windows] != pids:
+                raise RuntimeError("short handover replaced an existing SSH shell")
+            print("two original SSH shell PIDs survived the device handover", flush=True)
+        else:
+            if windows[1].process.wait(timeout=10) == 0:
+                raise RuntimeError("stalled SSH stream unexpectedly exited successfully")
+        try:
+            result = subprocess.run(endpoint("engineer", programs["engineer"], "link", "-key", keys["engineer"],
+                "--", "hostname && id -un && ip -4 -o addr show dev roam0"),
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            for r in roles:
+                print(r, command(r, programs[r], "status", "-key", keys[r]),
+                      guest(r, "roam-count", stdout=subprocess.PIPE).stdout, flush=True)
+            raise
+        if result.returncode or "lima-device" not in result.stdout or "ptlab" not in result.stdout or "10.78.2.2/24" not in result.stdout:
+            raise RuntimeError(f"SSH failed after switching {role}: {result.stdout} {result.stderr}")
+        if leases() != original:
+            raise RuntimeError("worker or signed grant changed during handover")
+        if any("换网直连" not in command(r, programs[r], "status", "-key", keys[r]) for r in roles):
+            raise RuntimeError("both workers must report the authenticated migrated path")
+        counter = guest(role, "roam-count", stdout=subprocess.PIPE).stdout
+        if not re.search(r"packets [1-9][0-9]* ", counter):
+            raise RuntimeError(f"{role} sent no translated UDP traffic on its new gateway")
+        print(f"{role}: {old[0]} -> {new} (WAN 198.18.1.{new.split('.')[2]}); new SSH verified hostname, user and device IP "
+              f"in {time.monotonic() - joined:.1f}s after join; both workers and tickets identical", flush=True)
+    command("device", programs["device"], "revoke", "-key", keys["device"])
+    until = time.monotonic() + 15
+    while any("没有有效" not in command(r, programs[r], "status", "-key", keys[r]) for r in roles):
+        if time.monotonic() >= until:
+            raise RuntimeError("revocation failed after both migrations")
+        time.sleep(0.3)
+    denied = subprocess.run(endpoint("engineer", programs["engineer"], "link", "-key", keys["engineer"], "--", "true"),
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=12)
+    if denied.returncode == 0 or "没有有效" not in denied.stderr:
+        raise RuntimeError("ended grant opened another terminal")
+    print("revocation after migration ended both workers and refused a new SSH terminal", flush=True)
+
+
+def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open", verify_sudo=False,
+          roam=None, before_connect=False):
     operator, target = ("device", "engineer") if cold else ("engineer", "device")
     nat = mode != "routed"
     failure = outcome in ("blocked", "incompatible")
@@ -235,6 +332,11 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                                env=dict(os.environ, LIMA_HOME=str(LAB / ".lima")), check=True, timeout=60)
                 command(role, "chmod", "700", dest)
                 programs[role] = dest
+        if roam:
+            digest = hashlib.sha256(Path(artifact).read_bytes()).hexdigest()
+            if any(command(r, "sha256sum", p).split()[0] != digest for r, p in programs.items()):
+                raise RuntimeError("the lab guests did not receive the same local build")
+            print("both guests running Linux ARM64 build", digest, flush=True)
         e, d = dirs[operator], dirs[target]
         if cold:
             programs[target], prefix, username, login, hostkey = cold_fixture(
@@ -278,7 +380,7 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 menu.configure(spec)
 
             device.send("5")
-            readiness = "本机 22 端口已关闭，OpenSSH 配置检查通过" if cold else r"127\.0\.0\.1:22 的 SSH 服务可用"
+            readiness = "本机 22 端口已关闭，临时 SSH 配置检查通过" if cold else r"127\.0\.0\.1:22 的 SSH 服务可用"
             device.expect(readiness)
             device.expect("❯ ")
             if cold and port22(target):
@@ -341,11 +443,17 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             device.expect("y 批准本次连接")
             if cold and port22(target):
                 raise RuntimeError("pasting a receipt opened port 22 without local approval")
+            if before_connect:
+                roam(target, "roam-cut")
             device.send("y")
             device.expect("已批准本次连接")
+            if before_connect:
+                device.expect("授权期内继续等待可达路径", 76)
+                roam(target, "roam-join")
+                print("device joined a new subnet after the first minute of an approved grant with no initial route", flush=True)
             if failure:
                 count = "0" if outcome == "blocked" else "[1-9][0-9]*"
-                device.expect(rf"未建立直连。被控方（[^）]*STUN 映射 {count}），控制方（[^）]*STUN 映射 {count}）", 75)
+                device.expect(rf"未建立直连。被控方（[^）]*映射候选 {count}），控制方（[^）]*映射候选 {count}）", 75)
                 control.expect(r"(?:操作结束|当前没有有效|本次授权已结束)", 75)
                 if port22(target, "established") or (cold and port22(target)):
                     raise RuntimeError("SSH was reached without a direct path")
@@ -378,13 +486,20 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             if device.process.wait(timeout=10):
                 raise RuntimeError("closing the menu failed")
             device = Menu(processes, target, d, programs[target], [], prefix)
-            device.expect(r"被控端 · 已连接 · 1 个终端")
+            device.expect_connected_terminals("被控端", 1)
             other = Menu(processes, operator, e, programs[operator], ["link"])
             other.send("printf 'SECOND_%s\\n' OK")
             other.expect(r"\nSECOND_OK\r?\n", 100)
-            device.send("/status")
-            device.expect(r"被控端 · 已连接 · 2 个终端")
+            device.expect_connected_terminals("被控端", 2)
             key = f"{e}/config/PeerTTY/device.key"
+            if before_connect:
+                result = command(operator, programs[operator], "link", "-key", key, "--", "ip -4 -o addr show dev roam0")
+                if "10.78.2.2/24" not in result or "换网直连" not in command(operator, programs[operator], "status", "-key", key):
+                    raise RuntimeError("first SSH terminal did not use the device's new network")
+                print("first connection and two SSH windows reached 10.78.2.2 under the original approved exchange", flush=True)
+            elif roam:
+                check_roaming(roam, (control, other), dirs, programs, offer, answer)
+                return
             if verify_sudo:
                 check_sudo(operator, target, programs[operator], key, username, allowed=cold, window=other)
             if ending == "exit":
@@ -400,13 +515,12 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 if cmd.returncode or cmd.stdout.strip()!=username:
                     raise RuntimeError("command after closing all SSH windows returned the wrong account")
                 control = Menu(processes, operator, e, programs[operator], [])
-                control.expect("控制端 · 已连接")
+                control.expect("已连接 · 控制端")
             else:
                 retained = write_from_both_windows(resources, target, username, (control, other))
                 if ending == "expire":
                     wait_near_expiry(expires_ms, timers, other)
-                device.send("/status")
-                device.expect(r"被控端 · 已连接 · 2 个终端")
+                device.expect_connected_terminals("被控端", 2)
             if ending != "expire":
                 device.send("/revoke")
                 device.expect("本次授权已撤销")

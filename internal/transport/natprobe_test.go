@@ -71,6 +71,9 @@ func TestProbeNATDetectsBehavior(t *testing.T) {
 		{"symmetric port dependent", []netip.AddrPort{s1, s2DiffPort}, NATPortDependent, "对称型 NAT"},
 		{"address pool", []netip.AddrPort{s1, s2DiffIP}, NATAddressDependent, "出口 IP 不同"},
 		{"single responder", []netip.AddrPort{s1, silent}, NATSingleServer, "只有一台 STUN"},
+		{"two names of one endpoint", []netip.AddrPort{s1, s1}, NATSingleServer, "只有一台 STUN"},
+		{"address change first", []netip.AddrPort{s1, s2DiffIP, s2DiffPort}, NATPortDependent, "对称型 NAT"},
+		{"port change first", []netip.AddrPort{s1, s2DiffPort, s2DiffIP}, NATPortDependent, "对称型 NAT"},
 		{"no response", []netip.AddrPort{silent}, NATNoResponse, "都未响应"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,18 +107,18 @@ func TestProbeNATNoneAndDirectPublicIP(t *testing.T) {
 	if _, err := ProbeNAT(t.Context(), "http://bad"); err == nil {
 		t.Fatal("accepted invalid STUN spec")
 	}
-	local := netip.MustParseAddrPort("203.0.113.5:5555")
+	local := netip.MustParseAddrPort("8.8.4.4:5555")
 	direct := NATReport{
 		Local: local,
 		Probes: []MappingProbe{
-			{Server: "stun:a:3478", Mapped: local},
-			{Server: "stun:b:3478", Mapped: local},
+			{Server: "stun:a:3478", Endpoint: netip.MustParseAddrPort("127.0.0.1:1234"), Mapped: local},
+			{Server: "stun:b:3478", Endpoint: netip.MustParseAddrPort("127.0.0.1:5678"), Mapped: local},
 		},
 	}
 	if !strings.Contains(direct.Verdict(), "公网地址") {
 		t.Fatalf("direct public IP verdict = %q", direct.Verdict())
 	}
-	if got := direct.Probes[0].String(); !strings.Contains(got, "a:3478") || !strings.Contains(got, "203.0.113.5:5555") {
+	if got := direct.Probes[0].String(); !strings.Contains(got, "a:3478") || !strings.Contains(got, "8.8.4.4:5555") {
 		t.Fatalf("probe string = %q", got)
 	}
 	failed := MappingProbe{Server: "stun:dead:3478", Err: errors.New("超时未响应")}

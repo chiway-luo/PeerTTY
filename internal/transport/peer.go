@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/pion/datachannel"
 	"github.com/pion/ice/v4"
 	"github.com/pion/stun/v4"
+	piontransport "github.com/pion/transport/v5"
 	"github.com/pion/transport/v5/stdnet"
 	"github.com/pion/webrtc/v4"
 )
@@ -34,21 +36,32 @@ type Peer struct {
 	cancel      context.CancelCauseFunc
 	stopRefresh context.CancelFunc
 	signaling   *signalingNet
+	roam        *roaming
 	tryUPnP     bool
 	mu          sync.Mutex
 	closed      bool
 	portMap     *portMapping
 }
 
+type peerMode int
+
+const (
+	singleSession peerMode = iota
+	reusableSession
+	networkDiagnostic
+)
+
 func New(parent context.Context, spec string) (*Peer, error) {
-	return newPeer(parent, spec, false)
+	return newPeer(parent, spec, singleSession)
 }
 
-// A reusable grant lets ICE recover its existing route after a transient
-// disconnection. The caller still owns the original authorization deadline.
-func NewGrant(parent context.Context, spec string) (*Peer, error) { return newPeer(parent, spec, true) }
+// A reusable grant can move its authenticated UDP path until the original
+// authorization deadline. Older peers continue using ordinary ICE.
+func NewGrant(parent context.Context, spec string) (*Peer, error) {
+	return newPeer(parent, spec, reusableSession)
+}
 
-func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) {
+func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) {
 	urls, err := STUNServers(spec)
 	if err != nil {
 		return nil, err
@@ -56,19 +69,44 @@ func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) 
 	var config webrtc.Configuration
 	var settings webrtc.SettingEngine
 	var signaling *signalingNet
+	var roam *roaming
+	lifetime, cancel := context.WithCancelCause(parent)
 	refreshCtx, stopRefresh := context.WithCancel(parent)
-	if len(urls) > 0 {
-		network, err := stdnet.NewNet()
+	if len(urls) > 0 || mode == reusableSession {
+		base, err := stdnet.NewNet()
 		if err != nil {
 			stopRefresh()
+			cancel(err)
 			return nil, err
 		}
-		signaling = &signalingNet{Net: network, ctx: refreshCtx, interval: 15 * time.Second}
-		settings.SetNet(signaling)
-		config.ICEServers = []webrtc.ICEServer{{URLs: urls}}
+		var network piontransport.Net = base
+		if mode == reusableSession {
+			roam, err = newRoaming(lifetime)
+			if err != nil {
+				stopRefresh()
+				cancel(err)
+				return nil, err
+			}
+			network = &roamingNet{Net: network, roam: roam}
+		}
+		if len(urls) > 0 {
+			signaling = &signalingNet{Net: network, ctx: refreshCtx, interval: 15 * time.Second}
+			network = signaling
+			config.ICEServers = []webrtc.ICEServer{{URLs: urls}}
+		}
+		settings.SetNet(network)
 	}
 	settings.SetSTUNGatherTimeout(gatherTimeout)
 	settings.SetICEMaxBindingRequests(32)
+	if mode == reusableSession {
+		// The signed deadline bounds the checklist. A validated path can appear
+		// even after the manual exchange or an initial extended outage.
+		settings.SetICEMaxBindingRequests(math.MaxUint16)
+		// Negotiate SCTP initialization in the signed SDP when both peers support
+		// it. A handover between DTLS and the first terminal then has no separate
+		// on-wire SCTP startup retry budget.
+		settings.EnableSctpSnap(true)
+	}
 	settings.DetachDataChannels()
 	settings.EnableDataChannelBlockWrite(true)
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
@@ -87,12 +125,12 @@ func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) 
 	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(config)
 	if err != nil {
 		stopRefresh()
+		cancel(err)
 		return nil, err
 	}
-	lifetime, cancel := context.WithCancelCause(parent)
-	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling, tryUPnP: hasRemoteSTUN(urls)}
+	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling, roam: roam, tryUPnP: mode != networkDiagnostic && hasRemoteSTUN(urls)}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if reusable && state == webrtc.PeerConnectionStateDisconnected {
+		if mode == reusableSession && state == webrtc.PeerConnectionStateDisconnected {
 			return
 		}
 		switch state {
@@ -108,9 +146,32 @@ func newPeer(parent context.Context, spec string, reusable bool) (*Peer, error) 
 func (p *Peer) Context() context.Context { return p.lifetime }
 func (p *Peer) Connected() bool          { return p.pc.ConnectionState() == webrtc.PeerConnectionStateConnected }
 
+func (p *Peer) CanRoam() bool { return p.roam != nil && p.roam.keys.Load() != nil }
+
+// BindGrant uses the signature of the exact approved answer, which also binds
+// the offer digest, both device identities, SSH keys, scope and signed deadline.
+func (p *Peer) BindGrant(receiptSignature []byte) error {
+	if p.roam == nil {
+		return nil
+	}
+	return p.roam.enable(receiptSignature, p.Connected)
+}
+
+func (p *Peer) Migrated() bool {
+	if p.roam == nil {
+		return false
+	}
+	p.roam.mu.Lock()
+	defer p.roam.mu.Unlock()
+	return p.roam.physical.socket != nil
+}
+
 func (p *Peer) Close() error {
 	p.stopRefresh()
 	p.cancel(context.Canceled)
+	if p.roam != nil {
+		p.roam.close()
+	}
 	p.mu.Lock()
 	p.closed = true
 	pm := p.portMap
@@ -265,6 +326,9 @@ func (p *Peer) gather(ctx context.Context, desc webrtc.SessionDescription) (stri
 			}
 		}
 	}
+	if p.roam != nil {
+		sdp = p.roam.advertise(sdp)
+	}
 	return sdp, nil
 }
 
@@ -295,17 +359,25 @@ func (p *Peer) setRemote(kind webrtc.SDPType, raw string) error {
 	}
 	count := 0
 	var mapped []netip.AddrPort
+	var contacts []netip.AddrPort
+	var roamKey string
 	for _, attr := range parsed.MediaDescriptions[0].Attributes {
+		if attr.Key == roamAttribute {
+			roamKey = attr.Value
+		}
 		if attr.Key == "candidate" {
 			candidate, err := ice.UnmarshalCandidate(attr.Value)
 			if err != nil || candidate.Type() == ice.CandidateTypeRelay {
 				return errors.New("invalid or relayed ICE candidate")
 			}
-			if candidate.Type() == ice.CandidateTypeServerReflexive && candidate.Component() == 1 && candidate.NetworkType().IsUDP() {
+			if candidate.Component() == 1 && candidate.NetworkType().IsUDP() {
 				ip, err := netip.ParseAddr(candidate.Address())
-				if err == nil && ip.IsGlobalUnicast() && candidate.Port() > 0 && candidate.Port() <= 65535 {
+				if err == nil && (ip.IsGlobalUnicast() || ip.IsLoopback()) && candidate.Port() > 0 && candidate.Port() <= 65535 {
 					addr := netip.AddrPortFrom(ip.Unmap(), uint16(candidate.Port()))
-					if !slices.Contains(mapped, addr) {
+					if !slices.Contains(contacts, addr) {
+						contacts = append(contacts, addr)
+					}
+					if candidate.Type() == ice.CandidateTypeServerReflexive && ip.IsGlobalUnicast() && !slices.Contains(mapped, addr) {
 						mapped = append(mapped, addr)
 					}
 				}
@@ -321,6 +393,9 @@ func (p *Peer) setRemote(kind webrtc.SDPType, raw string) error {
 	}
 	if p.signaling != nil {
 		p.signaling.remote.Store(&mapped)
+	}
+	if p.roam != nil {
+		p.roam.setRemote(roamKey, kind == webrtc.SDPTypeAnswer, contacts)
 	}
 	return nil
 }

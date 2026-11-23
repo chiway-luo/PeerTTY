@@ -8,7 +8,22 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestOwnershipConfirmationRequiresMatchBeforeDeadline(t *testing.T) {
+	ctx, stop := context.WithTimeout(t.Context(), 15*time.Millisecond)
+	defer stop()
+	if err := waitForOwnedConnection(ctx, nil, nil, func() (bool, error) { return false, nil }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("unconfirmed endpoint after deadline", err)
+	}
+	if err := waitForOwnedConnection(ctx, nil, nil, func() (bool, error) { return true, nil }); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("accepted stale match", err)
+	}
+	if err := waitForOwnedConnection(t.Context(), nil, nil, func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal("rejected current match", err)
+	}
+}
 
 type countedInput struct {
 	bytes.Buffer

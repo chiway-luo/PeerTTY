@@ -39,6 +39,9 @@ type Claims struct {
 type Ticket struct {
 	Claims    Claims `json:"claims"`
 	Signature []byte `json:"signature"`
+	// Presentation capability outside the signed claims. Older readers ignore it.
+	// Only a host advertising this bit can receive a compressed text reply.
+	CompactReply bool `json:"compact_reply,omitempty"`
 }
 
 func (t Ticket) Deadline() time.Time { return time.UnixMilli(t.Claims.ExpiresMS) }
@@ -74,9 +77,11 @@ func NewAnswer(key ed25519.PrivateKey, offer Ticket, sdp string) (Ticket, error)
 }
 
 func NewLoginAnswer(key ed25519.PrivateKey, offer Ticket, sdp string, login ed25519.PublicKey) (Ticket, error) {
-	return sign(key, Claims{Version: offer.Claims.Version, Kind: "answer", Session: offer.Claims.Session,
+	answer, err := sign(key, Claims{Version: offer.Claims.Version, Kind: "answer", Session: offer.Claims.Session,
 		ExpiresMS: offer.Claims.ExpiresMS, Recipient: Fingerprint(offer.Claims.Issuer),
 		OfferDigest: offer.digest(), SDP: sdp, SSHLoginKey: login})
+	answer.CompactReply = offer.CompactReply
+	return answer, err
 }
 
 func sign(key ed25519.PrivateKey, claims Claims) (Ticket, error) {
@@ -88,7 +93,7 @@ func sign(key ed25519.PrivateKey, claims Claims) (Ticket, error) {
 	if err != nil {
 		return Ticket{}, err
 	}
-	return Ticket{Claims: claims, Signature: ed25519.Sign(key, payload)}, nil
+	return Ticket{Claims: claims, Signature: ed25519.Sign(key, payload), CompactReply: claims.Kind == "offer"}, nil
 }
 
 func signingBytes(c Claims) ([]byte, error) {

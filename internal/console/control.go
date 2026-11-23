@@ -188,7 +188,6 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 		if err != nil {
 			return err
 		}
-		_ = grant.RecordPeer(t.KeyPath, peer, offer.Claims.DeviceName, time.Now())
 		return t.waitControl(ctx, st, isTicketText(invitation))
 	}
 	exe, err := os.Executable()

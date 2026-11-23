@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"peertty/internal/identitystate"
 )
 
 const (
@@ -16,13 +18,9 @@ const (
 	lastErrorMaxBytes = 4096
 )
 
-// LogPath returns the diagnostic log path alongside the device key, or "" if
-// the key path is not an absolute path in an existing directory.
+// LogPath returns the diagnostic log for this device identity.
 func LogPath(keyPath string) string {
-	if !filepath.IsAbs(keyPath) {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(keyPath), "worker.log")
+	return identitystate.Path(keyPath, "worker.log")
 }
 
 func lastErrorPath(keyPath string) string {
@@ -34,14 +32,18 @@ func lastErrorPath(keyPath string) string {
 
 func openWorkerLog(keyPath string) *os.File {
 	path := LogPath(keyPath)
-	if path == "" {
+	if path == "" || identitystate.EnsureDir(path) != nil {
 		return nil
 	}
-	if info, err := os.Stat(path); err == nil && info.Size() > maxWorkerLogSize {
-		_ = os.Truncate(path, 0)
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
+		return nil
+	}
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() || (info.Size() > maxWorkerLogSize && f.Truncate(0) != nil) {
+		f.Close()
 		return nil
 	}
 	return f

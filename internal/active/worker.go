@@ -28,6 +28,7 @@ type Options struct {
 	Port                                       int
 	Offer                                      grant.Ticket
 	Scoped                                     bool
+	RequireScoped                              bool
 }
 
 type worker struct {
@@ -64,7 +65,7 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	deadline := now.Add(opts.TTL)
 	switch opts.Role {
 	case "host":
-		if opts.TTL <= 0 || opts.TTL > grant.MaxTTL || opts.Port < 1 || opts.Port > 65535 {
+		if opts.TTL <= 0 || opts.TTL > grant.MaxTTL || opts.Port < 1 || opts.Port > 65535 || (opts.RequireScoped && opts.Port != 22) {
 			return errors.New("授权时长或 SSH 端口无效")
 		}
 	case "control":
@@ -91,7 +92,7 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	w := &worker{Options: opts, key: key, dir: dir, approval: make(chan grant.Ticket, 1),
-		state: State{ID: filepath.Base(dir), Role: opts.Role, Deadline: deadline, Phase: "gathering", User: opts.User, Identity: opts.Identity, SSHConfig: opts.SSHConfig}}
+		state: State{ID: filepath.Base(dir), Role: opts.Role, Deadline: deadline, Phase: "gathering", User: opts.User, Identity: opts.Identity, SSHConfig: opts.SSHConfig, RequireScoped: opts.RequireScoped}}
 	tlsCfg, err := localTLS(key)
 	if err != nil {
 		return err
@@ -177,6 +178,8 @@ func (w *worker) snapshot() State {
 	s := w.state
 	if s.Phase == "ready" && w.peer != nil && !w.peer.Connected() {
 		s.Phase = "disconnected"
+	} else if s.Phase == "ready" && w.peer != nil && w.peer.Migrated() {
+		s.Route = "udp · 换网直连"
 	}
 	return s
 }
@@ -199,9 +202,10 @@ func (w *worker) run(ctx context.Context) error {
 	}
 	defer p.Close()
 	w.resetLinks(p.Context())
-	var ticket grant.Ticket
+	var ticket, remoteTicket grant.Ticket
 	var loginKey ed25519.PublicKey
 	var answerSDP string
+	var receiptSignature []byte
 	if w.Role == "host" {
 		sdp, err := p.Offer(ctx)
 		if err != nil {
@@ -216,6 +220,8 @@ func (w *worker) run(ctx context.Context) error {
 			w.login, err = localssh.PrepareLogin(ctx)
 			if err == nil {
 				name, hostKey = w.login.User, w.login.HostKey
+			} else if w.RequireScoped {
+				return fmt.Errorf("本次授权账号的临时 SSH 复查失败: %w", err)
 			} else {
 				w.update(func(s *State) { s.Note = err.Error() })
 			}
@@ -240,6 +246,8 @@ func (w *worker) run(ctx context.Context) error {
 			return ctx.Err()
 		case answer = <-w.approval:
 		}
+		remoteTicket = answer
+		receiptSignature = answer.Signature
 		loginKey = answer.Claims.SSHLoginKey
 		answerSDP = answer.Claims.SDP
 		if len(loginKey) > 0 {
@@ -261,6 +269,7 @@ func (w *worker) run(ctx context.Context) error {
 		}
 	} else {
 		offer := w.Offer
+		remoteTicket = offer
 		sdp, err := p.Answer(ctx, offer.Claims.SDP)
 		if err != nil {
 			return err
@@ -285,6 +294,7 @@ func (w *worker) run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		receiptSignature = answer.Signature
 		path := filepath.Join(w.dir, "session.answer")
 		if err = answer.WriteNew(path); err != nil {
 			return err
@@ -298,6 +308,9 @@ func (w *worker) run(ctx context.Context) error {
 			s.Device = offer.Claims.DeviceName
 		})
 	}
+	if err := p.BindGrant(receiptSignature); err != nil {
+		return err
+	}
 	negotiating := ctx
 	if w.Role == "host" {
 		var stop context.CancelFunc
@@ -305,14 +318,29 @@ func (w *worker) run(ctx context.Context) error {
 		defer stop()
 	}
 	control, route, err := p.Channel(negotiating)
-	if err != nil {
-		if w.Role == "host" && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return fmt.Errorf("批准后 60 秒内未建立直连。被控方（%s），控制方（%s）", transport.CountCandidates(ticket.Claims.SDP), transport.CountCandidates(answerSDP))
+	var waitingNote string
+	if w.Role == "host" && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		reason := fmt.Sprintf("批准后 60 秒内未建立直连。被控方（%s），控制方（%s）", transport.CountCandidates(ticket.Claims.SDP), transport.CountCandidates(answerSDP))
+		if !p.CanRoam() {
+			return errors.New(reason)
 		}
+		waitingNote = reason + "。授权期内继续等待可达路径。"
+		w.update(func(s *State) { s.Note = waitingNote })
+		control, route, err = p.Channel(ctx)
+	}
+	if err != nil {
 		return fmt.Errorf("双方未建立直连 · %w", err)
 	}
 	defer control.Close()
+	trustErr := grant.RecordPeer(w.Key, grant.Fingerprint(remoteTicket.Claims.Issuer), remoteTicket.Claims.DeviceName, time.Now())
 	w.mu.Lock()
+	if w.state.Note == waitingNote {
+		w.state.Note = ""
+	}
+	if trustErr != nil {
+		w.state.Note = "无法保存设备信任记录 · " + trustErr.Error()
+		logWorkerEvent(w.state.ID, "无法保存设备信任记录")
+	}
 	w.peer = p
 	w.state.Phase = "ready"
 	w.state.Route = route
@@ -368,7 +396,7 @@ func (w *worker) run(ctx context.Context) error {
 const (
 	routeRecoveryWindow   = 15 * time.Second
 	prolongedOutageWindow = 60 * time.Second
-	prolongedOutageText   = "网络已持续中断超过 1 分钟；如已切换网络或出口 IP 变化，原直连无法自动恢复，请运行 /revoke 撤销并重新配对。"
+	prolongedOutageText   = "网络已持续中断超过 1 分钟。授权期内会继续尝试直连。若双方已知地址均不可达，可运行 /revoke 并重新配对。"
 )
 
 // Give live terminals a short recovery window, independently of the grant's
@@ -486,7 +514,7 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		case "approve":
 			if s.Role != "host" || s.Phase != "waiting" || req.Answer == nil {
 				err = errors.New("本次授权无法再次批准")
-			} else if err = req.Answer.VerifyAnswer(w.offer, time.Now()); err == nil {
+			} else if err = s.CheckAnswer(w.offer, *req.Answer, time.Now()); err == nil {
 				w.state.Phase = "connecting"
 				w.state.Device = req.Answer.Claims.DeviceName
 				w.approval <- *req.Answer

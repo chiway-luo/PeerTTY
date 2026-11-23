@@ -61,7 +61,7 @@ func TestUPnPAddInjectAndDeleteMapping(t *testing.T) {
 			mu.Unlock()
 			switch {
 			case strings.Contains(action, "GetExternalIPAddress"):
-				_, _ = io.WriteString(w, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddressResponse xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1"><NewExternalIPAddress>198.51.100.42</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>`)
+				_, _ = io.WriteString(w, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddressResponse xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1"><NewExternalIPAddress>8.8.8.8</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>`)
 			case strings.Contains(action, "AddPortMapping"), strings.Contains(action, "DeletePortMapping"):
 				_, _ = io.WriteString(w, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body/></s:Envelope>`)
 			default:
@@ -94,7 +94,7 @@ func TestUPnPAddInjectAndDeleteMapping(t *testing.T) {
 	if pm == nil {
 		t.Fatal("expected UPnP port mapping")
 	}
-	if !strings.Contains(updated, "198.51.100.42 51234 typ srflx raddr 192.168.1.50 rport 51234") {
+	if !strings.Contains(updated, "8.8.8.8 51234 typ srflx raddr 192.168.1.50 rport 51234") {
 		t.Fatalf("injected SDP missing UPnP srflx candidate:\n%s", updated)
 	}
 	if CountCandidates(updated).Mapped != 1 {
@@ -137,7 +137,7 @@ func TestUPnPEdgeCasesAndCandidateInjection(t *testing.T) {
 	if sdp, pm := mapAndInjectUPnP(t.Context(), nil, "v=0\r\n", time.Hour); sdp != "v=0\r\n" || pm != nil {
 		t.Fatalf("nil gateway modified SDP: %q %v", sdp, pm)
 	}
-	if ip, ok := localIPForGateway(netip.MustParseAddr("127.0.0.1")); !ok || !ip.Is4() {
+	if ip, ok := sourceIPv4(netip.MustParseAddrPort("127.0.0.1:1900")); !ok || !ip.Is4() {
 		t.Fatalf("localIPForGateway(127.0.0.1) = (%v, %v)", ip, ok)
 	}
 	// Injecting into an LF-only SDP without end-of-candidates appends cleanly.
@@ -147,7 +147,7 @@ func TestUPnPEdgeCasesAndCandidateInjection(t *testing.T) {
 	if !strings.Contains(injected, "198.51.100.9 50000 typ srflx raddr 192.168.1.9 rport 50000 generation 0\n") {
 		t.Fatalf("unexpected injected SDP: %q", injected)
 	}
-	// Gateway returning a private WAN IP (double-NAT / CGNAT) must be rejected.
+	// Carrier shared space is global unicast in netip, but not a public WAN.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/desc.xml":
@@ -156,7 +156,7 @@ func TestUPnPEdgeCasesAndCandidateInjection(t *testing.T) {
 				<controlURL>/ctl</controlURL>
 			</service></serviceList></device></root>`)
 		case "/ctl":
-			_, _ = io.WriteString(w, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddressResponse xmlns:u="urn:schemas-upnp-org:service:WANPPPConnection:1"><NewExternalIPAddress>10.0.0.5</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>`)
+			_, _ = io.WriteString(w, `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetExternalIPAddressResponse xmlns:u="urn:schemas-upnp-org:service:WANPPPConnection:1"><NewExternalIPAddress>100.64.0.7</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>`)
 		}
 	}))
 	defer srv.Close()
@@ -166,5 +166,18 @@ func TestUPnPEdgeCasesAndCandidateInjection(t *testing.T) {
 	}
 	if _, err := gw.addPortMapping(t.Context(), rel, 10*time.Second); err == nil {
 		t.Fatal("accepted private CGNAT external IP from UPnP gateway")
+	}
+}
+
+func TestDiagnosticPeerNeverMapsPorts(t *testing.T) {
+	for _, mode := range []peerMode{networkDiagnostic, singleSession, reusableSession} {
+		p, err := newPeer(t.Context(), "stun:192.0.2.1:3478", mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.tryUPnP != (mode != networkDiagnostic) {
+			t.Errorf("UPnP policy for mode %d: %t", mode, p.tryUPnP)
+		}
+		p.Close()
 	}
 }

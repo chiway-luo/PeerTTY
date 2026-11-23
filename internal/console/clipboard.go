@@ -101,11 +101,8 @@ func copyTicket(parent context.Context, out io.Writer, ticket grant.Ticket) (str
 	if err := writeTicketText(&b, ticket); err != nil {
 		return "", err
 	}
-	if handled, err := nativeWriteClipboard(b.String()); handled {
-		if err == nil {
-			return "已复制到系统剪贴板。", nil
-		}
-		return "", fmt.Errorf("无法复制凭证 · %w", err)
+	if handled, err := nativeWriteClipboard(b.String()); handled && err == nil {
+		return "已复制到系统剪贴板。", nil
 	}
 	return copyTicketWith(parent, out, ticket, clipboardCommand)
 }

@@ -250,6 +250,9 @@ def main():
     menu.add_argument("--check-sudo", action="store_true", help="compare a read-only UID check over SSH with the target account's existing sudo policy")
     punch = cmd.add_parser("punch-check", help="test private endpoints across clean, lossy and UDP-blocked NATs")
     punch.add_argument("--binary", required=True, help="current Linux ARM64 binary")
+    roam = cmd.add_parser("roam-check", help="switch each guest's active interface during one approved grant")
+    roam.add_argument("--binary", required=True, help="current Linux ARM64 binary")
+    roam.add_argument("--before-connect", action="store_true", help="switch before the first connection and verify grant expiry")
     profile = cmd.add_parser("profile")
     profile.add_argument("name", choices=PROFILES)
     edge = profile.add_mutually_exclusive_group()
@@ -283,6 +286,20 @@ def main():
             run([sys.executable, "-B", str(LAB / "menu_check.py"), active_profile()[1], binary,
                  "closed" if args.closed_ssh else "existing", args.ending, "0", "single", "open",
                  *(["--check-sudo"] if args.check_sudo else [])])
+        elif args.action == "roam-check":
+            binary = str(Path(args.binary).resolve(strict=True))
+            original = active_profile()
+            from contextlib import ExitStack
+            with ExitStack() as restore:
+                restore.callback(set_profile, *original)
+                set_profile("clean", "routed")
+                for role in ROLES:
+                    restore.callback(guest, role, "roam-restore")
+                    guest(role, "roam-prepare")
+                sys.dont_write_bytecode = True
+                from menu_check import check
+                check("routed", binary, False, "expire" if args.before_connect else "exit",
+                      roam=guest, before_connect=args.before_connect)
         elif args.action == "punch-check":
             binary = str(Path(args.binary).resolve(strict=True))
             original = active_profile()

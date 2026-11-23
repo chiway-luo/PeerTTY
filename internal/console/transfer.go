@@ -108,6 +108,9 @@ func scpArgs(exe string, s active.State, recursive bool, paths []string) ([]stri
 		expanded[i], remote = expandRemoteArg(p, s)
 		if remote {
 			hasRemote = true
+		} else if first, _, _ := strings.Cut(p, "/"); strings.Contains(first, ":") && filepath.VolumeName(p) == "" {
+			// scp interprets a colon before the first slash as a host separator.
+			expanded[i] = "." + string(filepath.Separator) + p
 		}
 	}
 	if !hasRemote {

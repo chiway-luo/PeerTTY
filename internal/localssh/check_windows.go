@@ -11,6 +11,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Keep Windows' default bind semantics. SO_REUSEADDR can share an active port.
+func bindLoopback(port int, _ bool) error {
+	fd, err := windows.WSASocket(windows.AF_INET, windows.SOCK_STREAM, windows.IPPROTO_TCP, nil, 0, windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	if err != nil {
+		return err
+	}
+	defer windows.Closesocket(fd)
+	return windows.Bind(fd, &windows.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}})
+}
+
 func systemTool(name string) (string, error) {
 	dir, err := windows.GetSystemDirectory()
 	if err != nil {
@@ -77,7 +87,7 @@ func checkStopped(ctx context.Context) Check {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		if login, err := PrepareLogin(ctx); err == nil {
 			if err = login.Close(); err == nil {
-				return Check{Ready: true, Message: "本机 22 端口已关闭，可由当前账号按次启动回环 OpenSSH。"}
+				return Check{Ready: true, ScopedOnly: true, Message: "本机 22 端口已关闭，本次授权账号的临时 SSH 配置检查通过。"}
 			}
 		}
 		return Check{Message: "本机 22 端口已关闭，临时 OpenSSH 需要本机管理员权限。",

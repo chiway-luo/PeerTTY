@@ -246,10 +246,35 @@ func (g *upnpGateway) externalIP(ctx context.Context) (netip.Addr, error) {
 		return netip.Addr{}, err
 	}
 	ip, err := netip.ParseAddr(strings.TrimSpace(raw))
-	if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+	if err != nil || !publicIPv4(ip) {
 		return netip.Addr{}, errors.New("gateway returned non-public external IP")
 	}
 	return ip, nil
+}
+
+// IsGlobalUnicast includes shared, documentation and reserved IPv4 space.
+var specialIPv4 = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+func publicIPv4(ip netip.Addr) bool {
+	if !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	// The PCP and TURN anycast addresses are global exceptions in 192.0.0.0/24.
+	if ip == netip.AddrFrom4([4]byte{192, 0, 0, 9}) || ip == netip.AddrFrom4([4]byte{192, 0, 0, 10}) {
+		return true
+	}
+	for _, prefix := range specialIPv4 {
+		if prefix.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *upnpGateway) addPortMapping(ctx context.Context, internal netip.AddrPort, lease time.Duration) (*portMapping, error) {
@@ -306,9 +331,9 @@ func xmlElementText(data []byte, localName string) (string, error) {
 	}
 }
 
-// localIPForGateway determines which local IPv4 address routes to the UPnP gateway.
-func localIPForGateway(gateway netip.Addr) (netip.Addr, bool) {
-	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: gateway.AsSlice(), Port: 1900})
+// sourceIPv4 finds the local IPv4 address selected for this destination.
+func sourceIPv4(target netip.AddrPort) (netip.Addr, bool) {
+	conn, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(target))
 	if err != nil {
 		return netip.Addr{}, false
 	}
@@ -327,7 +352,7 @@ func mapAndInjectUPnP(ctx context.Context, gw *upnpGateway, rawSDP string, lease
 	if gw == nil {
 		return rawSDP, nil
 	}
-	lanIP, ok := localIPForGateway(gw.gatewayHost)
+	lanIP, ok := sourceIPv4(netip.AddrPortFrom(gw.gatewayHost, 1900))
 	if !ok {
 		return rawSDP, nil
 	}

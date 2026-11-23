@@ -81,6 +81,32 @@ type guard struct {
 // Native sshd can log throughout a session. Keep a bounded tail for failures.
 type diagnosticTail []byte
 
+func waitForOwnedConnection(ctx context.Context, exited <-chan struct{}, tick <-chan time.Time, inspect func() (bool, error)) error {
+	for {
+		ok, err := inspect()
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("未能确认临时 SSH 连接归属: %w", ctx.Err())
+		case <-exited:
+			return errors.New("OpenSSH 在验证连接前退出")
+		default:
+		}
+		if ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("未能确认临时 SSH 连接归属: %w", ctx.Err())
+		case <-exited:
+			return errors.New("OpenSSH 在验证连接前退出")
+		case <-tick:
+		}
+	}
+}
+
 func (d *diagnosticTail) Write(p []byte) (int, error) {
 	const limit = 2048
 	n := len(p)

@@ -19,8 +19,23 @@ func (t *Console) option(key, label string) {
 	fmt.Fprintf(t.out, "  %s  %s\n", key, label)
 }
 
-func (t *Console) hostReady(ctx context.Context) error {
-	return t.checkSSH(ctx, true, func() localssh.Check { return localssh.CheckHost(ctx, t.SSHPort) })
+func (t *Console) hostReady(ctx context.Context) (localssh.Check, error) {
+	var state localssh.Check
+	err := t.checkSSH(ctx, true, func() localssh.Check {
+		state = localssh.CheckHost(ctx, t.SSHPort)
+		return state
+	})
+	return state, err
+}
+
+func sshIndicator(st localssh.Check) (string, string) {
+	if st.Closed && st.Ready {
+		return "33", "○"
+	}
+	if st.Ready {
+		return "32", "✓"
+	}
+	return "33", "!"
 }
 
 func (t *Console) checkSSH(ctx context.Context, host bool, inspect func() localssh.Check) error {
@@ -29,11 +44,8 @@ func (t *Console) checkSSH(ctx context.Context, host bool, inspect func() locals
 			return err
 		}
 		st := inspect()
-		if st.Ready {
-			t.notice("32", "✓", st.Message)
-		} else {
-			t.notice("33", "!", st.Message)
-		}
+		color, mark := sshIndicator(st)
+		t.notice(color, mark, st.Message)
 		if st.Detail != "" {
 			t.line(st.Detail)
 		}
@@ -89,7 +101,7 @@ func (t *Console) checkSSH(ctx context.Context, host bool, inspect func() locals
 		case "2":
 		case "3":
 			if host {
-				port, err := t.selectSSHPort(ctx)
+				port, _, err := t.selectSSHPort(ctx)
 				if err != nil {
 					return err
 				}

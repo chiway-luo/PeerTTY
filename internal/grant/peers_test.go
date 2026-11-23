@@ -1,8 +1,11 @@
 package grant
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -47,5 +50,60 @@ func TestShortFingerprintAndKnownPeersTOFU(t *testing.T) {
 	// A different key with a distinct name is simply new.
 	if check := LookupPeer(keyPath, fpB, "other-host"); check.Trust != PeerNew {
 		t.Fatalf("distinct host check = %+v, want PeerNew", check)
+	}
+}
+
+func TestTrustHistoryIsPreservedWhenLargeOrUnreadable(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "device.key")
+	fp := Fingerprint([]byte("first"))
+	if err := RecordPeer(key, fp, "first", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	path := peersPath(key)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A legitimate 0.4.0 history could exceed its former 256 KiB read limit.
+	raw = append(bytes.Repeat([]byte(" "), 256*1024), raw...)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordPeer(key, Fingerprint([]byte("second")), "second", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if LookupPeer(key, fp, "first").Trust != PeerKnown {
+		t.Fatal("lost previous device")
+	}
+	for _, damaged := range []string{"{damaged", "null", `{"foreign":{}}`, fmt.Sprintf(`{"%s":{}}`, fp)} {
+		if err := os.WriteFile(path, []byte(damaged), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := RecordPeer(key, fp, "first", time.Now()); err == nil {
+			t.Fatal("overwrote unreadable history")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != damaged || LookupPeer(key, fp, "first").Trust != PeerHistoryUnavailable {
+			t.Fatal("lost damaged history", err)
+		}
+	}
+}
+
+func TestConcurrentRecordsKeepEveryDevice(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "device.key")
+	done := make(chan error, 8)
+	for i := range 8 {
+		go func() { name := fmt.Sprint(i); done <- RecordPeer(key, Fingerprint([]byte(name)), name, time.Now()) }()
+	}
+	for range 8 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 8 {
+		name := fmt.Sprint(i)
+		if LookupPeer(key, Fingerprint([]byte(name)), name).Trust != PeerKnown {
+			t.Fatal("lost device", name)
+		}
 	}
 }

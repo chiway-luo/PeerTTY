@@ -80,7 +80,6 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 		return err
 	}
 	opts.KeyPath = path
-	applySavedSettings(&opts)
 	if opts.SSHConfig != "" && opts.SSHConfig != "none" {
 		opts.SSHConfig, err = userPath(opts.SSHConfig)
 		if err != nil {
@@ -91,6 +90,15 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if opts.StateDir != "" {
+		if err := importDirectorySettings(path); err != nil {
+			return err
+		}
+		if err := grant.ImportDirectoryPeers(path); err != nil {
+			return err
+		}
+	}
+	applySavedSettings(&opts)
 	t := &Console{Settings: opts, in: in, out: out, key: key, fingerprint: grant.Fingerprint(key.Public().(ed25519.PublicKey))}
 	t.pasteTTY = pasteTerminal(in, out)
 	t.interactive = terminalFile(in) && terminalFile(out)
@@ -166,14 +174,16 @@ func (t *Console) menu(ctx context.Context) error {
 		case "/doctor":
 			err = NetworkCheck(ctx, t.pageOut(), t.STUN, false)
 		case "/check":
-			err = t.hostReady(ctx)
+			_, err = t.hostReady(ctx)
 		case "/help":
 			page = helpPage
 		case "/clipboard":
-			t.autoCopy = !t.autoCopy
-			t.NoClipboard = !t.autoCopy
-			_ = saveSettings(t.Settings)
-			if t.autoCopy {
+			disabled := !t.NoClipboard
+			if err = saveSettings(t.KeyPath, persistedSettings{NoClipboard: &disabled}); err != nil {
+				break
+			}
+			t.NoClipboard, t.autoCopy = disabled, t.interactive && !disabled
+			if !disabled {
 				t.notice("32", "✓", "凭证自动复制已开启。")
 			} else {
 				t.notice("32", "✓", "凭证自动复制已关闭。")
@@ -246,25 +256,34 @@ func (t *Console) settings(ctx context.Context) error {
 	if _, err := transport.STUNServers(newSTUN); err != nil {
 		return err
 	}
-	port, err := t.selectSSHPort(ctx)
+	port, entered, err := t.selectSSHPort(ctx)
 	if err != nil {
 		return err
 	}
+	var changes persistedSettings
+	if v != "" {
+		changes.STUN = &newSTUN
+	}
+	if entered {
+		changes.SSHPort = &port
+	}
+	if err := saveSettings(t.KeyPath, changes); err != nil {
+		return err
+	}
 	t.STUN, t.SSHPort = newSTUN, port
-	_ = saveSettings(t.Settings)
 	t.notice("32", "✓", "连接设置已应用。")
 	return nil
 }
 
-func (t *Console) selectSSHPort(ctx context.Context) (int, error) {
+func (t *Console) selectSSHPort(ctx context.Context) (int, bool, error) {
 	for {
 		v, err := t.prompt(ctx, fmt.Sprintf("本机 SSH 端口 [%d] > ", t.SSHPort))
 		if err != nil || v == "" {
-			return t.SSHPort, err
+			return t.SSHPort, false, err
 		}
 		port, err := strconv.Atoi(v)
 		if err == nil && port >= 1 && port <= 65535 {
-			return port, nil
+			return port, true, nil
 		}
 		t.notice("33", "!", "请输入 1–65535 的端口，或输入 q 返回。")
 	}

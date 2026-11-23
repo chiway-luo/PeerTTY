@@ -155,7 +155,11 @@ func TestExpiredHostReturnsToSameMenu(t *testing.T) {
 	}
 	defer ln.Close()
 	go func() {
-		if c, err := ln.Accept(); err == nil {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
 			fmt.Fprintln(c, "SSH-2.0-menu_fixture")
 			c.Close()
 		}
@@ -413,10 +417,45 @@ func TestAuthorizationHours(t *testing.T) {
 		keys.Close()
 		var output bytes.Buffer
 		c := Console{Settings: Settings{TTL: time.Hour}, in: in, out: &output}
-		d, err := c.askDuration(t.Context())
+		d, err := c.askDuration(t.Context(), localssh.Check{})
 		in.Close()
 		if err != nil || d != time.Duration(tc.hours)*time.Hour || strings.Count(output.String(), "请输入 1 到 24") != tc.retries {
 			t.Fatal(d, err, output.String())
 		}
+	}
+}
+
+func TestDurationScreenNoticesWhenSSHCloses(t *testing.T) {
+	if color, mark := sshIndicator(localssh.Check{Ready: true, Closed: true}); color == "32" || mark == "✓" {
+		t.Fatal("closed port with valid temporary configuration is shown as listening")
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			fmt.Fprint(c, "SSH-2.0-fixture\r\n")
+			io.Copy(io.Discard, c)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	initial := localssh.ProbeListener(t.Context(), port)
+	if !initial.Ready || initial.Closed {
+		t.Fatalf("expected a listening SSH service: %+v", initial)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 16*time.Second)
+	defer cancel()
+	updates := watchListener(ctx, port, initial)
+	ln.Close()
+	select {
+	case state := <-updates:
+		if state.Ready || !state.Closed {
+			t.Fatalf("closed SSH still available: %+v", state)
+		}
+	case <-ctx.Done():
+		t.Fatal("duration screen kept the old SSH status")
 	}
 }

@@ -69,7 +69,7 @@ func TestInformationalCommands(t *testing.T) {
 			t.Fatalf("%s did not list the session commands: %v", arg, err)
 		}
 	}
-	if out, err := commandOutput(t, "doctor", "-stun", "none", "-require-mapping"); err == nil || !strings.Contains(out, "STUN 映射 0") {
+	if out, err := commandOutput(t, "doctor", "-stun", "none", "-require-mapping"); err == nil || !strings.Contains(out, "映射候选 0") {
 		t.Fatalf("offline diagnostic: %q, %v", out, err)
 	}
 }
@@ -115,6 +115,12 @@ func TestInactiveCLICommands(t *testing.T) {
 	}
 	if _, err := commandOutput(t, "sftp", "-state-dir", state); !errors.Is(err, active.ErrInactive) {
 		t.Fatalf("inactive sftp: %v", err)
+	}
+	for _, sep := range [][]string{nil, {"--"}} {
+		args := append([]string{"sftp", "-state-dir", state}, sep...)
+		if _, err := commandOutput(t, append(args, "-b", "batch.txt")...); !errors.Is(err, active.ErrInactive) {
+			t.Fatalf("native sftp flags did not reach grant lookup: %v", err)
+		}
 	}
 }
 

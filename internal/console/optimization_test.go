@@ -22,9 +22,10 @@ import (
 func TestCompressedTicketRoundTripLegacyAndZipBombDefense(t *testing.T) {
 	// Realistic repetitive SDP compresses dramatically with zlib.
 	ticket := grant.Ticket{
+		CompactReply: true,
 		Claims: grant.Claims{
 			Version: 3,
-			Kind:    "offer",
+			Kind:    "answer",
 			Session: strings.Repeat("ab", 32),
 			SDP:     strings.Repeat("a=candidate:12345 1 udp 2130706431 192.168.1.10 54321 typ host generation 0\r\n", 25),
 		},
@@ -72,6 +73,52 @@ func TestCompressedTicketRoundTripLegacyAndZipBombDefense(t *testing.T) {
 	}
 }
 
+func TestSignedTicketTextNegotiatesWithLegacyHosts(t *testing.T) {
+	host, hostKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, operatorKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	offer, err := grant.NewPairingOffer(hostKey, "offer candidates", "operator", now.Add(time.Hour))
+	if err != nil || !offer.CompactReply {
+		t.Fatalf("offer does not advertise compact answers: %v", err)
+	}
+	roundTrip := func(ticket grant.Ticket, compact bool) grant.Ticket {
+		t.Helper()
+		var out bytes.Buffer
+		if err := writeTicketText(&out, ticket); err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(out.Bytes())
+		if block == nil || json.Valid(block.Bytes) == compact {
+			t.Fatalf("unexpected PEM encoding for %s, compact=%v", ticket.Claims.Kind, compact)
+		}
+		got, err := readTicket(out.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, supportsCompact := range []bool{false, true} {
+		offer.CompactReply = supportsCompact
+		received := roundTrip(offer, false)
+		if err := received.VerifyOffer(grant.Fingerprint(host), grant.Fingerprint(operator), now); err != nil {
+			t.Fatal(err)
+		}
+		answer, err := grant.NewAnswer(operatorKey, received, strings.Repeat("answer candidates ", 20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := roundTrip(answer, supportsCompact).VerifyAnswer(offer, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestShowPeerIdentityDisplaysFingerprintAndTOFUWarnings(t *testing.T) {
 	pubA, _, _ := ed25519.GenerateKey(rand.Reader)
 	pubB, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -107,7 +154,8 @@ func TestSettingsPersistenceAndCLIOverrides(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "device.key")
 	initial := Settings{KeyPath: keyPath, STUN: "stun:custom.example:3478", SSHPort: 2222, TTL: 2 * time.Hour, NoClipboard: true}
-	if err := saveSettings(initial); err != nil {
+	ttl := initial.TTL.String()
+	if err := saveSettings(keyPath, persistedSettings{STUN: &initial.STUN, SSHPort: &initial.SSHPort, TTL: &ttl, NoClipboard: &initial.NoClipboard}); err != nil {
 		t.Fatal(err)
 	}
 	loaded := Settings{KeyPath: keyPath, STUN: "auto", SSHPort: 22, TTL: time.Hour}
@@ -123,6 +171,32 @@ func TestSettingsPersistenceAndCLIOverrides(t *testing.T) {
 	applySavedSettings(&overridden)
 	if overridden.STUN != "none" || overridden.SSHPort != 2200 || overridden.TTL != 30*time.Minute || overridden.NoClipboard {
 		t.Fatalf("explicit CLI flags were overwritten: %+v", overridden)
+	}
+}
+
+func TestClipboardChangePreservesUnrelatedFilesAndSessionOverrides(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "support.key")
+	if _, err := grant.NewIdentity(key); err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(dir, "settings.json")
+	original := []byte(`{"application":"other"}`)
+	if err := os.WriteFile(foreign, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	in, out := sshMenuInput(t, "/clipboard\n0\n")
+	opts := Settings{KeyPath: key, STUN: "none", ExplicitSTUN: true, TTL: 24 * time.Hour, ExplicitTTL: true, SSHPort: 22, NoClipboard: true}
+	if err := Run(t.Context(), opts, in, out); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(foreign); err != nil || !bytes.Equal(data, original) {
+		t.Fatal("changed unrelated settings", err)
+	}
+	var saved persistedSettings
+	data, err := os.ReadFile(settingsPath(key))
+	if err != nil || json.Unmarshal(data, &saved) != nil || saved.NoClipboard == nil || *saved.NoClipboard || saved.STUN != nil || saved.TTL != nil || saved.SSHPort != nil {
+		t.Fatalf("saved runtime overrides: %s (%v)", data, err)
 	}
 }
 
@@ -180,6 +254,9 @@ func TestTransferSCPAndSFTPArgs(t *testing.T) {
 	}
 	if _, err := scpArgs("/usr/bin/peertty", s, false, []string{":/only-one"}); err == nil {
 		t.Fatal("accepted scp with fewer than 2 paths")
+	}
+	if got, err := scpArgs("/usr/bin/peertty", s, false, []string{":/tmp/file", "report:today.log"}); err != nil || got[len(got)-1] != "."+string(filepath.Separator)+"report:today.log" {
+		t.Fatalf("ambiguous local scp destination: %v, %v", got, err)
 	}
 	sftp := sftpArgs("/usr/bin/peertty", s, []string{"-b", "batch.txt"})
 	if sftp[len(sftp)-1] != "ops@peertty-abc" || !slices.Contains(sftp, "-b") || !slices.Contains(sftp, "StrictHostKeyChecking=yes") {

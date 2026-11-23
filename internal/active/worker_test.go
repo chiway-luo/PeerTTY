@@ -150,6 +150,9 @@ func TestCachedLocalTLSAndLastError(t *testing.T) {
 	}
 	// Worker log opens cleanly and truncates when exceeding maxWorkerLogSize.
 	logPath := LogPath(keyPath)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(logPath, bytes.Repeat([]byte("x"), maxWorkerLogSize+100), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -323,6 +326,10 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	}
 	start(Options{Role: "control", Key: operator, Offer: offer, User: "fixture"})
 	b := wait(operator, "waiting")
+	hostFP := grant.Fingerprint(offer.Claims.Issuer)
+	if got := grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName); got.Trust != grant.PeerNew {
+		t.Fatal("unapproved offer was recorded as trusted", got)
+	}
 	if c, err := Pipe(ctx, operator, b.ID); err == nil {
 		c.Close()
 		t.Fatal("opened before approval")
@@ -348,6 +355,10 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	}
 	wait(host, "ready")
 	wait(operator, "ready")
+	if grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName).Trust != grant.PeerKnown ||
+		grant.LookupPeer(host, grant.Fingerprint(answer.Claims.Issuer), answer.Claims.DeviceName).Trust != grant.PeerKnown {
+		t.Fatal("approved connected peers were not recorded")
+	}
 	var terminals []net.Conn
 	for i := 0; i < 2; i++ {
 		c, err := Pipe(ctx, operator, b.ID)

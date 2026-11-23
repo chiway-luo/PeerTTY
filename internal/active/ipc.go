@@ -30,8 +30,20 @@ type State struct {
 	ID, Role, Phase, Device, User, Route, Exchange, Note string
 	Deadline                                             time.Time
 	Terminals                                            int
+	RequireScoped                                        bool
 	// Local OpenSSH options for the authorized controller, sent only over local mTLS.
 	Alias, Identity, KnownHosts, SSHConfig string
+}
+
+// CheckAnswer also enforces the login mode that actually passed host preflight.
+func (s State) CheckAnswer(offer, answer grant.Ticket, now time.Time) error {
+	if err := answer.VerifyAnswer(offer, now); err != nil {
+		return err
+	}
+	if s.RequireScoped && len(answer.Claims.SSHLoginKey) == 0 {
+		return errors.New("本机仅准备了本次授权账号的临时 SSH，请使用邀请中的账号重新配对")
+	}
+	return nil
 }
 
 type request struct {

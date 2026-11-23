@@ -46,22 +46,34 @@ func missingOpenSSH(server bool) Check {
 }
 
 func checkStopped(ctx context.Context) Check {
-	return stoppedCheck{
+	p := stoppedCheck{
 		stat:        func() error { _, err := os.Stat(sshd); return err },
 		euid:        os.Geteuid,
 		hasGuard:    func() bool { exe, _ := os.Executable(); return adminGuardPath(exe) != "" },
 		bind:        probeBind22,
 		checkConfig: checkNativeConfig,
-	}.run(ctx)
+	}
+	if runtime.GOOS != "darwin" {
+		return p.run(ctx)
+	}
+	p.checkSession = func(ctx context.Context) error {
+		login, err := PrepareLogin(ctx)
+		if err != nil {
+			return err
+		}
+		return login.Close()
+	}
+	return p.run(ctx)
 }
 
 // Keep the decision separate from OS probes so their outcomes can be tested
 // without touching the machine's OpenSSH setup, privileges or port 22.
 type stoppedCheck struct {
-	stat, bind  func() error
-	euid        func() int
-	hasGuard    func() bool
-	checkConfig func(context.Context) (string, error)
+	stat, bind   func() error
+	euid         func() int
+	hasGuard     func() bool
+	checkConfig  func(context.Context) (string, error)
+	checkSession func(context.Context) error
 }
 
 func (p stoppedCheck) run(ctx context.Context) Check {
@@ -86,6 +98,15 @@ func (p stoppedCheck) run(ctx context.Context) Check {
 		if log == "" {
 			log = err.Error()
 		}
+		// A scoped login uses its own host key and the ordinary account's
+		// existing sshd policy. Require its own bind and policy checks.
+		if p.checkSession != nil && p.euid() != 0 &&
+			(strings.Contains(log, "no hostkeys available") || strings.Contains(log, "a password is required")) &&
+			p.bind() == nil {
+			if err := p.checkSession(probe); err == nil {
+				return Check{Ready: true, Closed: true, ScopedOnly: true, Message: "本机 22 端口已关闭，本次授权账号的临时 SSH 配置检查通过。"}
+			}
+		}
 		return unixConfigProblem(log)
 	}
 	return temporaryReady()
@@ -103,6 +124,10 @@ func checkNativeConfig(ctx context.Context) (string, error) {
 // bind without listen: test this user's low-port permission without accepting a
 // connection, starting a daemon or changing any OS network settings.
 func probeBind22() error {
+	return bindLoopback(22, false)
+}
+
+func bindLoopback(port int, reuse bool) error {
 	syscall.ForkLock.RLock()
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
 	if err == nil {
@@ -113,7 +138,12 @@ func probeBind22() error {
 		return err
 	}
 	defer syscall.Close(fd)
-	return syscall.Bind(fd, &syscall.SockaddrInet4{Port: 22, Addr: [4]byte{127, 0, 0, 1}})
+	if reuse {
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+			return err
+		}
+	}
+	return syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}})
 }
 
 func systemInstallRequired() Check {
@@ -171,6 +201,9 @@ func unixConfigProblem(log string) Check {
 	const runtimeDir = "/run/sshd"
 	switch {
 	case strings.Contains(log, "no hostkeys available"):
+		if runtime.GOOS == "darwin" {
+			return Check{Message: "本机 22 端口已关闭，系统 SSH 当前没有可用的主机密钥。"}
+		}
 		return adminAction("OpenSSH 缺少可用的主机密钥。", "生成缺失的系统默认 SSH 主机密钥", "/usr/bin/ssh-keygen", "-A")
 	case runtime.GOOS == "linux" && (strings.HasSuffix(log, "Missing privilege separation directory: /run/sshd") ||
 		strings.HasSuffix(log, "Missing privilege separation directory: /var/run/sshd")):

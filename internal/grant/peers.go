@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"peertty/internal/identitystate"
 )
 
-const maxKnownPeersFile = 256 * 1024
+const maxKnownPeersFile = 16 * 1024 * 1024
 
 type PeerTrust int
 
@@ -17,6 +18,7 @@ const (
 	PeerNew PeerTrust = iota
 	PeerKnown
 	PeerKeyMismatch
+	PeerHistoryUnavailable
 )
 
 // PeerRecord stores a previously approved or contacted device fingerprint for TOFU.
@@ -35,31 +37,32 @@ type PeerCheck struct {
 }
 
 func peersPath(keyPath string) string {
-	if keyPath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(keyPath), "known_peers.json")
+	return identitystate.Path(keyPath, "known_peers.json")
 }
 
-func loadPeers(path string) (map[string]PeerRecord, error) {
-	if path == "" {
-		return nil, nil
-	}
-	data, err := readLimited(path, maxKnownPeersFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]PeerRecord{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var peers map[string]PeerRecord
-	if err := json.Unmarshal(data, &peers); err != nil {
-		return nil, err
-	}
-	if peers == nil {
-		peers = map[string]PeerRecord{}
+func decodePeers(data []byte) (map[string]PeerRecord, error) {
+	peers := map[string]PeerRecord{}
+	if data != nil {
+		if err := json.Unmarshal(data, &peers); err != nil {
+			return nil, err
+		}
+		if peers == nil {
+			return nil, errors.New("设备信任记录格式无效")
+		}
+		for fp, rec := range peers {
+			if !ValidFingerprint(fp) || rec.FirstSeen.IsZero() || rec.LastSeen.IsZero() {
+				return nil, errors.New("设备信任记录缺少有效指纹或连接时间")
+			}
+		}
 	}
 	return peers, nil
+}
+
+func ImportDirectoryPeers(key string) error {
+	return identitystate.ImportLegacy(key, "known_peers.json", maxKnownPeersFile, func(data []byte) bool {
+		peers, err := decodePeers(data)
+		return err == nil && len(peers) != 0
+	})
 }
 
 // LookupPeer checks whether the device fingerprint has been seen before, or
@@ -68,8 +71,19 @@ func LookupPeer(keyPath, fingerprint, deviceName string) PeerCheck {
 	if !ValidFingerprint(fingerprint) {
 		return PeerCheck{Trust: PeerNew}
 	}
-	peers, err := loadPeers(peersPath(keyPath))
-	if err != nil || len(peers) == 0 {
+	path := peersPath(keyPath)
+	if path == "" {
+		return PeerCheck{Trust: PeerNew}
+	}
+	data, err := identitystate.Read(path, maxKnownPeersFile)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return PeerCheck{Trust: PeerHistoryUnavailable}
+	}
+	peers, err := decodePeers(data)
+	if err != nil {
+		return PeerCheck{Trust: PeerHistoryUnavailable}
+	}
+	if len(peers) == 0 {
 		return PeerCheck{Trust: PeerNew}
 	}
 	if rec, ok := peers[fingerprint]; ok {
@@ -100,40 +114,21 @@ func RecordPeer(keyPath, fingerprint, deviceName string, now time.Time) error {
 	if path == "" || !ValidFingerprint(fingerprint) {
 		return nil
 	}
-	peers, err := loadPeers(path)
-	if err != nil {
-		// Do not lose future trust tracking if a corrupted file exists.
-		peers = map[string]PeerRecord{}
-	}
-	rec, ok := peers[fingerprint]
-	if !ok {
-		rec.FirstSeen = now.UTC()
-	}
-	if name := strings.TrimSpace(deviceName); name != "" {
-		rec.Name = name
-	}
-	rec.LastSeen = now.UTC()
-	peers[fingerprint] = rec
+	return identitystate.Update(path, maxKnownPeersFile, func(data []byte) ([]byte, error) {
+		peers, err := decodePeers(data)
+		if err != nil {
+			return nil, err
+		}
+		rec, ok := peers[fingerprint]
+		if !ok {
+			rec.FirstSeen = now.UTC()
+		}
+		if name := strings.TrimSpace(deviceName); name != "" {
+			rec.Name = name
+		}
+		rec.LastSeen = now.UTC()
+		peers[fingerprint] = rec
 
-	data, err := json.MarshalIndent(peers, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".peertty-peers-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	_, writeErr := tmp.Write(data)
-	closeErr := tmp.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+		return json.MarshalIndent(peers, "", "  ")
+	})
 }

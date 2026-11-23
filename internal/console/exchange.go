@@ -21,12 +21,14 @@ const ticketBegin = "-----BEGIN " + ticketType + "-----"
 const ticketEnd = "-----END " + ticketType + "-----"
 
 // Short PEM lines round-trip through terminals with a canonical input limit.
-// Compress large SDP tickets with zlib while staying backward-compatible with
-// plain-JSON PEM tickets emitted by earlier versions.
+// Invitations must be readable before the recipient's version is known.
 func writeTicketText(out io.Writer, ticket grant.Ticket) error {
 	data, err := json.Marshal(ticket)
 	if err != nil {
 		return err
+	}
+	if ticket.Claims.Kind != "answer" || !ticket.CompactReply {
+		return pem.Encode(out, &pem.Block{Type: ticketType, Bytes: data})
 	}
 	payload := data
 	var compressed bytes.Buffer
@@ -143,6 +145,8 @@ func showPeerIdentity(out io.Writer, label, keyPath string, issuer ed25519.Publi
 		}
 	case grant.PeerKeyMismatch:
 		fmt.Fprintf(out, "! 警告    同名设备曾使用不同指纹 %s，请核对上方设备指纹后再确认。\n", check.ConflictID)
+	case grant.PeerHistoryUnavailable:
+		fmt.Fprintln(out, "! 设备信任记录无法读取，请单独核对指纹。")
 	case grant.PeerNew:
 		if keyPath != "" {
 			fmt.Fprintln(out, "信任记录  首次连接的设备")

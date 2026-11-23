@@ -23,6 +23,7 @@ import (
 const refused = windows.WSAECONNREFUSED
 
 var tcpTable = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpTable")
+var isProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
 
 // MIB_TCPTABLE_OWNER_PID has a DWORD count followed by six DWORDs per IPv4 row.
 // Report ready only when the kernel attributes the loopback listener to our child.
@@ -64,7 +65,7 @@ func ownsListener(pid, port int) (bool, error) {
 // ownsClientConnection verifies via GetExtendedTcpTable that the temporary sshd
 // process has an active loopback connection from the exact parent client port,
 // and no unexpected local peer is attached to it.
-func ownsClientConnection(pid, localPort, clientPort int) (bool, error) {
+func ownsClientConnection(job windows.Handle, pid, localPort, clientPort int) (bool, error) {
 	const connectionsWithPID = 4
 	size := uint32(4096)
 	for {
@@ -88,20 +89,48 @@ func ownsClientConnection(pid, localPort, clientPort int) (bool, error) {
 		matched := false
 		for i := uint32(0); i < count; i++ {
 			row := table[4+i*rowSize : 4+(i+1)*rowSize]
-			if binary.LittleEndian.Uint32(row[20:24]) != uint32(pid) {
-				continue
-			}
+			owner := binary.LittleEndian.Uint32(row[20:24])
 			laddr := binary.BigEndian.Uint32(row[4:8])
 			lport := int(binary.BigEndian.Uint16(row[8:10]))
+			if owner != uint32(pid) {
+				// Some OpenSSH builds hand the socket to a session child.
+				if owner == 0 || owner == uint32(os.Getpid()) || laddr != 0x7f000001 || lport != localPort {
+					continue
+				}
+				member, err := processInGuardJob(owner, job)
+				if err != nil {
+					return false, err
+				}
+				if !member {
+					continue
+				}
+			}
 			raddr := binary.BigEndian.Uint32(row[12:16])
 			rport := int(binary.BigEndian.Uint16(row[16:18]))
 			if laddr != 0x7f000001 || lport != localPort || raddr != 0x7f000001 || rport != clientPort {
 				return false, errors.New("检测到未授权的本机连接接入临时 OpenSSH")
 			}
-			matched = true
+			// MIB_TCP_STATE_ESTAB. A closing socket is no longer attachable.
+			if binary.LittleEndian.Uint32(row[:4]) == 5 {
+				matched = true
+			}
 		}
 		return matched, nil
 	}
+}
+
+func processInGuardJob(pid uint32, job windows.Handle) (bool, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(process)
+	var member int32
+	ok, _, err := isProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&member)))
+	if ok == 0 {
+		return false, err
+	}
+	return member != 0, nil
 }
 
 func guardCmd(exe, deadline string) *exec.Cmd {
@@ -110,10 +139,10 @@ func guardCmd(exe, deadline string) *exec.Cmd {
 
 // The guard is a dedicated subprocess. Its non-inheritable job handle lives
 // until process exit, when Windows also terminates any remaining sshd children.
-func ownProcessTree() error {
+func ownProcessTree() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -124,8 +153,9 @@ func ownProcessTree() error {
 	}
 	if err != nil {
 		windows.CloseHandle(job)
+		return 0, err
 	}
-	return err
+	return job, nil
 }
 
 func windowsListenArgs(port int) []string {
@@ -178,7 +208,8 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("请安装并初始化 Windows OpenSSH Server: %w", err)
 	}
-	if err := ownProcessTree(); err != nil {
+	job, err := ownProcessTree()
+	if err != nil {
 		return fmt.Errorf("创建临时 OpenSSH 进程组: %w", err)
 	}
 	attempts := 1
@@ -209,7 +240,7 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 		} else if err := checkWindowsConfig(ctx, path); err != nil {
 			return err
 		}
-		err, retry := runWindowsSSHD(ctx, path, args, port, ready, ports, out)
+		err, retry := runWindowsSSHD(ctx, job, path, args, port, ready, ports, out)
 		if !retry {
 			return err
 		}
@@ -218,7 +249,7 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	return lastErr
 }
 
-func runWindowsSSHD(ctx context.Context, path string, args []string, port int, ready string, ports <-chan int, out io.Writer) (error, bool) {
+func runWindowsSSHD(ctx context.Context, job windows.Handle, path string, args []string, port int, ready string, ports <-chan int, out io.Writer) (error, bool) {
 	run, cancel := context.WithCancel(ctx)
 	defer cancel()
 	server := exec.CommandContext(run, path, args...)
@@ -255,22 +286,12 @@ func runWindowsSSHD(ctx context.Context, path string, args []string, port int, r
 		return err, false
 	}
 	// Verify that the attached connection belongs to the parent's exact local port.
-	verifyDeadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(verifyDeadline) {
-		ok, err := ownsClientConnection(server.Process.Pid, port, clientPort)
-		if err != nil {
-			return err, false
-		}
-		if ok {
-			break
-		}
-		select {
-		case <-start.Done():
-			return start.Err(), false
-		case <-done:
-			return fmt.Errorf("OpenSSH 在验证连接前退出 (%v)", waitErr), false
-		case <-tick.C:
-		}
+	verify, stopVerify := context.WithTimeout(start, 2*time.Second)
+	defer stopVerify()
+	if err := waitForOwnedConnection(verify, done, tick.C, func() (bool, error) {
+		return ownsClientConnection(job, server.Process.Pid, port, clientPort)
+	}); err != nil {
+		return err, false
 	}
 	if _, err := fmt.Fprintln(out, "ATTACHED"); err != nil {
 		return err, false

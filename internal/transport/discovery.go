@@ -87,7 +87,7 @@ func CountCandidates(raw string) Candidates {
 }
 
 func (c Candidates) String() string {
-	return fmt.Sprintf("接口 IPv4 %d、IPv6 %d，STUN 映射 %d", c.IPv4, c.IPv6, c.Mapped)
+	return fmt.Sprintf("接口 IPv4 %d、IPv6 %d，映射候选 %d", c.IPv4, c.IPv6, c.Mapped)
 }
 
 // CheckNetwork uses the session's ICE configuration without an identity, a
@@ -95,7 +95,7 @@ func (c Candidates) String() string {
 func CheckNetwork(parent context.Context, spec string) (Candidates, error) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
-	p, err := New(ctx, spec)
+	p, err := newPeer(ctx, spec, networkDiagnostic)
 	if err != nil {
 		return Candidates{}, err
 	}

@@ -55,6 +55,9 @@ func phaseName(s active.State) string {
 func printStatus(out io.Writer, s active.State) {
 	fmt.Fprintf(out, "%s · %s · %d 个终端 · %s 到期（剩余 %s）\n", roleNames[s.Role], phaseName(s), s.Terminals, s.Deadline.Local().Format("01-02 15:04"), max(time.Duration(0), time.Until(s.Deadline)).Round(time.Second))
 	showDeviceName(out, "对端", s.Device)
+	if s.Route != "" {
+		fmt.Fprintln(out, "直连路径  "+s.Route)
+	}
 	if s.Note != "" {
 		fmt.Fprintln(out, s.Note)
 	}

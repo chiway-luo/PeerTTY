@@ -5,6 +5,7 @@ package console
 import (
 	"errors"
 	"path/filepath"
+	"runtime"
 	"time"
 	"unsafe"
 
@@ -17,12 +18,14 @@ const (
 )
 
 var (
-	user32DLL        = windows.NewLazySystemDLL("user32.dll")
-	openClipboard    = user32DLL.NewProc("OpenClipboard")
-	closeClipboard   = user32DLL.NewProc("CloseClipboard")
-	emptyClipboard   = user32DLL.NewProc("EmptyClipboard")
-	getClipboardData = user32DLL.NewProc("GetClipboardData")
-	setClipboardData = user32DLL.NewProc("SetClipboardData")
+	user32DLL              = windows.NewLazySystemDLL("user32.dll")
+	openClipboard          = user32DLL.NewProc("OpenClipboard")
+	closeClipboard         = user32DLL.NewProc("CloseClipboard")
+	emptyClipboard         = user32DLL.NewProc("EmptyClipboard")
+	getClipboardData       = user32DLL.NewProc("GetClipboardData")
+	setClipboardData       = user32DLL.NewProc("SetClipboardData")
+	createClipboardWindow  = user32DLL.NewProc("CreateWindowExW")
+	destroyClipboardWindow = user32DLL.NewProc("DestroyWindow")
 
 	globalAlloc   = consoleDLL.NewProc("GlobalAlloc")
 	globalLock    = consoleDLL.NewProc("GlobalLock")
@@ -32,9 +35,9 @@ var (
 	rtlMoveMemory = consoleDLL.NewProc("RtlMoveMemory")
 )
 
-func openWinClipboard() error {
+func openWinClipboard(owner uintptr) error {
 	for range 5 {
-		if ok, _, _ := openClipboard.Call(0); ok != 0 {
+		if ok, _, _ := openClipboard.Call(owner); ok != 0 {
 			return nil
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -47,34 +50,50 @@ func nativeWriteClipboard(text string) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-	if err := openWinClipboard(); err != nil {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	// A message-only STATIC window owns the transaction even in Windows Terminal.
+	class, _ := windows.UTF16PtrFromString("STATIC")
+	const hwndMessage = ^uintptr(2)
+	owner, _, err := createClipboardWindow.Call(0, uintptr(unsafe.Pointer(class)), 0, 0, 0, 0, 0, 0, hwndMessage, 0, 0, 0)
+	if owner == 0 {
+		return true, err
+	}
+	defer destroyClipboardWindow.Call(owner)
+	bytesLen := uintptr(len(utf16) * 2)
+	hMem, _, err := globalAlloc.Call(gmemMoveable, bytesLen)
+	if hMem == 0 {
+		return true, err
+	}
+	defer func() {
+		if hMem != 0 {
+			globalFree.Call(hMem)
+		}
+	}()
+	ptr, _, err := globalLock.Call(hMem)
+	if ptr == 0 {
+		return true, err
+	}
+	rtlMoveMemory.Call(ptr, uintptr(unsafe.Pointer(&utf16[0])), bytesLen)
+	globalUnlock.Call(hMem)
+	if err := openWinClipboard(owner); err != nil {
 		return true, err
 	}
 	defer closeClipboard.Call()
 	if ok, _, err := emptyClipboard.Call(); ok == 0 {
 		return true, err
 	}
-	bytesLen := uintptr(len(utf16) * 2)
-	hMem, _, err := globalAlloc.Call(gmemMoveable, bytesLen)
-	if hMem == 0 {
-		return true, err
-	}
-	ptr, _, err := globalLock.Call(hMem)
-	if ptr == 0 {
-		globalFree.Call(hMem)
-		return true, err
-	}
-	rtlMoveMemory.Call(ptr, uintptr(unsafe.Pointer(&utf16[0])), bytesLen)
-	globalUnlock.Call(hMem)
 	if res, _, err := setClipboardData.Call(cfUnicodeText, hMem); res == 0 {
-		globalFree.Call(hMem)
 		return true, err
 	}
+	hMem = 0 // SetClipboardData transferred ownership to the system.
 	return true, nil
 }
 
 func nativeReadClipboard() (string, bool, error) {
-	if err := openWinClipboard(); err != nil {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := openWinClipboard(0); err != nil {
 		return "", true, err
 	}
 	defer closeClipboard.Call()

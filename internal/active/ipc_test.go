@@ -183,6 +183,11 @@ func TestWorkerAcceptsOneApprovalForTheCurrentGrant(t *testing.T) {
 		}
 	}
 	approval := request{Op: "approve", ID: "current", Answer: &answer}
+	w.update(func(s *State) { s.RequireScoped = true })
+	if res := callWorker(approval); res.Error == "" || w.snapshot().Phase != "waiting" || len(w.approval) != 0 {
+		t.Fatal("accepted a system SSH login after only the scoped configuration passed")
+	}
+	w.update(func(s *State) { s.RequireScoped = false })
 	if res := callWorker(approval); res.Error != "" || res.State.Phase != "connecting" {
 		t.Fatalf("approval: %+v", res)
 	}

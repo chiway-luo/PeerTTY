@@ -83,6 +83,29 @@ func commandContext(args []string) (context.Context, func()) {
 	return ctx, func() { signal.Stop(hup); cancel(); stop() }
 }
 
+// The leading PeerTTY identity flags belong to this process. From the first
+// native option onward, preserve sftp's arguments, including their values.
+func sftpOptions(args []string) (identity, native []string) {
+	for i := 0; i < len(args); {
+		if args[i] == "--" {
+			return args[:i], args[i+1:]
+		}
+		name, _, assigned := strings.Cut(args[i], "=")
+		switch name {
+		case "-key", "--key", "-state-dir", "--state-dir":
+			i++
+			if !assigned && i < len(args) {
+				i++
+			}
+		case "-h", "--help":
+			return args[:i+1], nil
+		default:
+			return args[:i], args[i:]
+		}
+	}
+	return args, nil
+}
+
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		args = []string{"menu"}
@@ -124,7 +147,12 @@ func run(ctx context.Context, args []string) error {
 		if args[0] == "cp" {
 			fs.BoolVar(&recursive, "r", false, "递归传输目录")
 		}
-		if err := fs.Parse(args[1:]); err != nil {
+		flags := args[1:]
+		var native []string
+		if args[0] == "sftp" {
+			flags, native = sftpOptions(flags)
+		}
+		if err := fs.Parse(flags); err != nil {
 			return err
 		}
 		path, err := console.IdentityPath(*dir, *key)
@@ -138,7 +166,7 @@ func run(ctx context.Context, args []string) error {
 		case "cp":
 			return console.Copy(ctx, path, os.Stdin, os.Stdout, os.Stderr, recursive, fs.Args())
 		case "sftp":
-			return console.SFTP(ctx, path, os.Stdin, os.Stdout, os.Stderr, fs.Args())
+			return console.SFTP(ctx, path, os.Stdin, os.Stdout, os.Stderr, native)
 		}
 		if fs.NArg() != 0 {
 			return errors.New("状态与撤销命令不接受额外参数")

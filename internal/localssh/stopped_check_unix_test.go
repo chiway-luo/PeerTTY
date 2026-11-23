@@ -62,3 +62,20 @@ func TestStoppedSSHChecksWithoutMachineSideEffects(t *testing.T) {
 		})
 	}
 }
+
+func TestClosedHostChecksScopedPolicyBeforeOfferingSessionLogin(t *testing.T) {
+	noKeys := errors.New("no hostkeys available")
+	probe := stoppedCheck{
+		stat: func() error { return nil }, euid: func() int { return 501 },
+		hasGuard: func() bool { return false }, bind: func() error { return nil },
+		checkConfig:  func(context.Context) (string, error) { return noKeys.Error(), noKeys },
+		checkSession: func(context.Context) error { return nil },
+	}
+	if st := probe.run(t.Context()); !st.Closed || !st.Ready || !st.ScopedOnly || st.Apply != nil {
+		t.Fatalf("scoped preflight: %+v", st)
+	}
+	probe.checkSession = func(context.Context) error { return errors.New("account policy requires system login") }
+	if st := probe.run(t.Context()); st.Ready || st.ScopedOnly {
+		t.Fatalf("accepted a failed account policy: %+v", st)
+	}
+}

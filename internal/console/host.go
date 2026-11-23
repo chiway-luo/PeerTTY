@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"peertty/internal/active"
 	"peertty/internal/grant"
+	"peertty/internal/localssh"
 	"peertty/internal/transport"
 )
 
@@ -27,14 +30,19 @@ func (t *Console) host(ctx context.Context) error {
 	if !t.terminalUI() {
 		fmt.Fprintln(t.out, "允许被控制 · 输入 q 返回")
 	}
-	if err := t.hostReady(ctx); err != nil {
-		return err
-	}
-	ttl, err := t.askDuration(ctx)
+	initial, err := t.hostReady(ctx)
 	if err != nil {
 		return err
 	}
-	st, err := active.Start(ctx, active.Options{Role: "host", Key: t.KeyPath, Port: t.SSHPort, TTL: ttl, STUN: t.STUN})
+	ttl, err := t.askDuration(ctx, initial)
+	if err != nil {
+		return err
+	}
+	current, err := t.hostReady(ctx)
+	if err != nil {
+		return err
+	}
+	st, err := active.Start(ctx, active.Options{Role: "host", Key: t.KeyPath, Port: t.SSHPort, TTL: ttl, STUN: t.STUN, RequireScoped: current.ScopedOnly})
 	if err != nil {
 		return err
 	}
@@ -55,7 +63,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 	var input <-chan line
 	var previous active.State
 	for {
-		if st.Phase != previous.Phase || ((st.Phase == "ready" || st.Phase == "disconnected") && st != previous) {
+		if st.Phase != previous.Phase || ((st.Phase == "ready" || st.Phase == "disconnected" || st.Phase == "connecting") && st != previous) {
 			t.setActivity(waitLabel(st))
 			t.clearPage()
 			switch st.Phase {
@@ -80,6 +88,9 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				t.writeHostPrompt(false)
 			case "connecting":
 				t.line("已批准本次连接。正在进行双向 UDP 探测。")
+				if st.Note != "" {
+					t.line(st.Note)
+				}
 			case "ready":
 				t.notice("32", "●", "被控会话已连接 · "+st.Route)
 				if !t.terminalUI() {
@@ -169,9 +180,6 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 						if err := active.Approve(ctx, t.KeyPath, st.ID, *pending); err != nil {
 							return err
 						}
-						if len(pending.Claims.Issuer) > 0 {
-							_ = grant.RecordPeer(t.KeyPath, grant.Fingerprint(pending.Claims.Issuer), pending.Claims.DeviceName, time.Now())
-						}
 						pending = nil
 						st.Phase = "connecting"
 						continue
@@ -186,7 +194,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 						answer, err = readTicket(value)
 					}
 					if err == nil {
-						err = answer.VerifyAnswer(offer, time.Now())
+						err = st.CheckAnswer(offer, answer, time.Now())
 					}
 					if err != nil {
 						t.notice("33", "!", "回执无效，可重新输入 · "+err.Error())
@@ -282,23 +290,120 @@ func (t *Console) writeHostPrompt(approval bool) {
 	fmt.Fprint(t.pageOut(), v.composer(label, v.muted(keys)))
 }
 
-func (t *Console) askDuration(ctx context.Context) (time.Duration, error) {
+// The two reserved rows leave the cursor and any partially typed duration in place.
+func (t *Console) showListener(st localssh.Check) {
+	v := t.view()
+	color, mark := sshIndicator(st)
+	detail, _, _ := strings.Cut(st.Detail, "\n")
+	fmt.Fprintf(t.out, "\x1b7\x1b[H\x1b[2K%s%s\x1b[2;1H\x1b[2K%s%s\x1b8",
+		v.margin, v.ink(color, ansi.Truncate(mark+" "+st.Message, v.width, "…")),
+		v.margin, v.muted(ansi.Truncate(detail, v.width, "…")))
+}
+
+func (t *Console) askDuration(ctx context.Context, initial localssh.Check) (time.Duration, error) {
 	ttl := t.TTL
-	for {
-		v, err := t.prompt(ctx, fmt.Sprintf("授权时长  1–24 小时或如 30m [回车 %s] > ", ttlLabel(t.TTL)))
-		if err != nil {
-			return 0, err
-		}
-		if v == "" {
-			break
-		}
-		if d, ok := parseGrantDuration(v); ok {
-			ttl = d
-			break
-		}
-		t.notice("33", "!", "请输入 1 到 24 的整数小时（或 1m–24h 如 30m），或输入 q 返回。")
+	var updates <-chan localssh.Check
+	if t.fullScreen {
+		watch, cancel := context.WithCancel(ctx)
+		defer cancel()
+		updates = watchListener(watch, t.SSHPort, initial)
+		t.clearPage()
+		fmt.Fprint(t.out, "\x1b[3;r\x1b[3;1H")
+		defer func() {
+			fmt.Fprint(t.out, "\x1b[r")
+			t.clearPage()
+		}()
+		t.showListener(initial)
 	}
-	return ttl, nil
+	prompt := fmt.Sprintf("授权时长  1–24 小时或如 30m [回车 %s] > ", ttlLabel(t.TTL))
+	if t.terminalUI() {
+		prompt = t.view().fieldPrompt(prompt, "q 返回主菜单")
+	}
+	for {
+		fmt.Fprint(t.pageOut(), prompt)
+		var item line
+	waitInput:
+		for {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case st := <-updates:
+				initial = st
+				t.showListener(st)
+			case item = <-t.next():
+				t.submitEntry()
+				break waitInput
+			}
+		}
+		message := "请输入 1 到 24 的整数小时（或 1m–24h 如 30m），或输入 q 返回。"
+		if item.err != nil {
+			if _, ok := item.err.(inputIssue); !ok {
+				return 0, item.err
+			}
+			message = item.err.Error()
+		} else {
+			if strings.EqualFold(item.text, "q") {
+				return 0, errBack
+			}
+			if item.text == "" {
+				return ttl, nil
+			}
+			if d, ok := parseGrantDuration(item.text); ok {
+				return d, nil
+			}
+		}
+		if t.fullScreen {
+			fmt.Fprint(t.out, "\x1b[3;1H")
+			t.showListener(initial)
+		}
+		t.notice("33", "!", message)
+	}
+}
+
+func watchListener(ctx context.Context, port int, initial localssh.Check) <-chan localssh.Check {
+	updates := make(chan localssh.Check, 1)
+	var vacant func() bool
+	if !initial.Closed {
+		vacant = localssh.VacancyProbe(port)
+	}
+	go func() {
+		tick := time.NewTicker(2 * time.Second)
+		defer tick.Stop()
+		last := initial
+		lastProbe := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-tick.C:
+				// Avoid opening an unauthenticated SSH connection on every tick.
+				// Recheck periodically even if a privileged or lingering socket blocks bind.
+				if vacant != nil && now.Sub(lastProbe) < 12*time.Second && !vacant() {
+					continue
+				}
+				lastProbe = now
+			}
+			state := localssh.ProbeListener(ctx, port)
+			if state.Closed {
+				vacant = nil
+			} else if vacant == nil {
+				vacant = localssh.VacancyProbe(port)
+			}
+			if state.Closed && last.Closed || !state.Closed && state.Message == last.Message {
+				continue
+			}
+			last = state
+			if state.Closed && port == 22 {
+				state.Message = "本机 22 端口已关闭，提交授权时长后将复查临时 SSH。"
+			}
+			select {
+			case updates <- state:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return updates
 }
 
 func parseGrantDuration(v string) (time.Duration, bool) {

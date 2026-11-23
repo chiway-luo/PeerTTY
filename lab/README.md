@@ -53,6 +53,20 @@
 
 两个 SSH 窗口各向被控机上的同一个测试文件写入一行。第一轮由被控方主动撤销，第二轮等待签名邀请的 180 秒测试期限自然结束。脚本检查两个窗口均已断开、两端均已释放授权、新的 `peertty link` 被拒绝，再通过虚拟机管理通道读回两行内容。最后由测试夹具清理该文件。
 
+## 验证换网后沿用原授权
+
+先启动两台靶机，在项目根目录构建并运行。
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o lab/.lima/peertty-roam-linux-arm64 ./cmd/peertty
+./lab/ctl roam-check --binary lab/.lima/peertty-roam-linux-arm64
+./lab/ctl roam-check --binary lab/.lima/peertty-roam-linux-arm64 --before-connect
+```
+
+`roam-check` 先打开两个 SSH 窗口。被控端移除 `eth0` 的旧地址，切换到 `roam0`、新子网和独立 NAT 出口。测试在两窗读回原 shell PID，再通过新的 SSH 登录检查设备地址。随后控制端断网 26 秒并换网，测试核对双方后台监听端口及邀请、回执文件的哈希，最后撤销授权并检查新登录被拒绝。
+
+加上 `--before-connect` 后，测试在被控端批准前断开旧网，等到批准满一分钟才接入新网，随后验证首次 SSH 登录和原授权自然到期。测试网关允许外部地址联系本机已经使用过的 UDP 映射。两种测试退出时都会恢复原实验网络。
+
 ## 切换网络
 
 ```sh

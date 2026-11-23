@@ -1,15 +1,23 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
 	"time"
 
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 	"peertty/internal/transport"
 )
+
+func importDirectorySettings(key string) error {
+	return identitystate.ImportLegacy(key, "settings.json", maxSettingsFile, func(data []byte) bool {
+		var settings persistedSettings
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		return json.Valid(data) && dec.Decode(&settings) == nil && settings != (persistedSettings{})
+	})
+}
 
 const maxSettingsFile = 16 * 1024
 
@@ -21,10 +29,7 @@ type persistedSettings struct {
 }
 
 func settingsPath(keyPath string) string {
-	if keyPath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(keyPath), "settings.json")
+	return identitystate.Path(keyPath, "settings.json")
 }
 
 // applySavedSettings loads persisted user defaults from settings.json alongside
@@ -34,11 +39,7 @@ func applySavedSettings(opts *Settings) {
 	if path == "" {
 		return
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Size() > maxSettingsFile {
-		return
-	}
-	data, err := os.ReadFile(path)
+	data, err := identitystate.Read(path, maxSettingsFile)
 	if err != nil {
 		return
 	}
@@ -64,41 +65,30 @@ func applySavedSettings(opts *Settings) {
 	}
 }
 
-func saveSettings(opts Settings) error {
-	path := settingsPath(opts.KeyPath)
-	if path == "" {
+func saveSettings(keyPath string, changes persistedSettings) error {
+	path := settingsPath(keyPath)
+	if path == "" || changes == (persistedSettings{}) {
 		return nil
 	}
-	stun := opts.STUN
-	port := opts.SSHPort
-	noClip := opts.NoClipboard
-	payload := persistedSettings{
-		STUN:        &stun,
-		SSHPort:     &port,
-		NoClipboard: &noClip,
-	}
-	if opts.TTL > 0 && opts.TTL <= grant.MaxTTL {
-		ttl := opts.TTL.String()
-		payload.TTL = &ttl
-	}
-	data, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".peertty-settings-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	_, wErr := tmp.Write(data)
-	if err := errors.Join(wErr, tmp.Close()); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	return nil
+	return identitystate.Update(path, maxSettingsFile, func(data []byte) ([]byte, error) {
+		var saved persistedSettings
+		if data != nil {
+			if err := json.Unmarshal(data, &saved); err != nil {
+				return nil, err
+			}
+		}
+		if changes.STUN != nil {
+			saved.STUN = changes.STUN
+		}
+		if changes.SSHPort != nil {
+			saved.SSHPort = changes.SSHPort
+		}
+		if changes.NoClipboard != nil {
+			saved.NoClipboard = changes.NoClipboard
+		}
+		if changes.TTL != nil {
+			saved.TTL = changes.TTL
+		}
+		return json.MarshalIndent(saved, "", "  ")
+	})
 }
