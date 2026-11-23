@@ -29,6 +29,10 @@ func EnsureDir(path string) error {
 	if err := os.Mkdir(dir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	return checkDir(dir)
+}
+
+func checkDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return err
@@ -36,10 +40,13 @@ func EnsureDir(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("PeerTTY 状态路径不是目录: %s", dir)
 	}
-	return nil
+	return checkPermissions(dir, info)
 }
 
 func Read(path string, limit int64) ([]byte, error) {
+	if err := checkDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -47,11 +54,21 @@ func Read(path string, limit int64) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("PeerTTY 状态文件不是普通文件: %s", path)
 	}
+	if err := checkPermissions(path, info); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("PeerTTY 状态文件在读取时已更换: %s", path)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("%s 超过 %d 字节", path, limit)
@@ -70,6 +87,9 @@ func ImportLegacy(key, name string, limit int64, recognized func([]byte) bool) e
 	}
 	if _, err := os.Lstat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if _, err := os.Lstat(legacy); errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
 	data, err := Read(legacy, limit)
 	if errors.Is(err, os.ErrNotExist) {

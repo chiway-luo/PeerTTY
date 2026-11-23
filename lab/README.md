@@ -53,6 +53,18 @@
 
 两个 SSH 窗口各向被控机上的同一个测试文件写入一行。第一轮由被控方主动撤销，第二轮等待签名邀请的 180 秒测试期限自然结束。脚本检查两个窗口均已断开、两端均已释放授权、新的 `peertty link` 被拒绝，再通过虚拟机管理通道读回两行内容。最后由测试夹具清理该文件。
 
+### 检查同名第三身份
+
+在两台靶机运行时，从项目根目录执行以下命令。
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o lab/.lima/peertty-identity-linux-arm64 ./cmd/peertty
+./lab/ctl menu-check --binary lab/.lima/peertty-identity-linux-arm64 --check-identity --revoke
+./lab/ctl menu-check --binary lab/.lima/peertty-identity-linux-arm64 --check-identity --revoke --closed-ssh
+```
+
+测试先打开两个 SSH 终端，再在控制端虚拟机的独立配置目录生成第三套设备密钥。第三身份用相同主机名和目标账号回答同一份邀请，向正在连接的被控端提交自己的回执。脚本检查第三身份的终端数、被控端记录的指纹，以及原来两个 shell 的 PID。反向测试还分别用两个身份运行 SFTP 批处理。
+
 ## 验证换网后沿用原授权
 
 先启动两台靶机，在项目根目录构建并运行。

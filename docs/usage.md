@@ -30,7 +30,7 @@ peertty
 | 再打开一个 SSH 终端 | 在控制端的新窗口运行 `peertty link`。多个窗口可同时连接。 |
 | 从脚本运行命令 | 例如 `peertty link -- hostname`。命令输出和退出码可由调用方读取。 |
 | 拷贝文件或目录 | 运行 `peertty cp [-r] <源路径>... <目标路径>`，远端路径用 `:` 或 `remote:` 开头，如 `peertty cp :/var/log/app.log ./` 或 `peertty cp -r ./scripts :/tmp/`。 |
-| 交互式 SFTP 传文件 | 运行 `peertty sftp`，批处理使用 `peertty sftp -b batch.txt`。 |
+| 交互式 SFTP 传文件 | 运行 `peertty sftp`，批处理使用 `peertty sftp -b batch.txt`。可用 `-l` 限速、`-R` 调整并发请求数。连接目标、SSH 程序和身份由当前授权指定。 |
 | 关闭当前 SSH 窗口 | 输入 `exit`。同一授权下的其他窗口仍可继续工作。 |
 | 查看当前授权与异常记录 | 两端均可重新运行 `peertty`，也可运行 `peertty status` 查看角色、到期时间与连接数。若后台近期异常结束，`peertty status` 会显示原因及 `worker.log` 路径。被控端输入 `/host` 可查看活动并找回待发送的邀请。 |
 | 结束本次授权 | 被控面板输入 `q`，或在同一设备的任意终端运行 `peertty revoke`。撤销或到期会断开这份授权的全部终端与传输，之后再次连接需要新授权。会话中已完成的修改保留。 |

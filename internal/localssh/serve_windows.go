@@ -220,7 +220,7 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	for attempt := 0; attempt < attempts; attempt++ {
 		port := 22
 		ready := "READY"
-		args := append([]string{"-D", "-e"}, windowsSSHDArgs()...)
+		args := windowsSSHDArgs()
 		if mode != "" {
 			if mode == "login-open" {
 				l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -235,12 +235,13 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 			if err != nil {
 				return err
 			}
-			// Native debug mode serves one connection as the current user.
-			args = append([]string{"-d", "-e"}, login...)
+			args = login
 		} else if err := checkWindowsConfig(ctx, path); err != nil {
 			return err
 		}
-		err, retry := runWindowsSSHD(ctx, job, path, args, port, ready, ports, out)
+		// OpenSSH's single-connection mode closes the listener after accept.
+		// Each later authorized terminal owns a separate process and socket.
+		err, retry := runWindowsSSHD(ctx, job, path, append([]string{"-d", "-e"}, args...), port, ready, ports, out)
 		if !retry {
 			return err
 		}

@@ -89,19 +89,13 @@ var (
 // cachedLocalTLS avoids regenerating a self-signed Ed25519 X.509 certificate
 // on every status poll while immediately invalidating if the key file changes.
 func cachedLocalTLS(keyPath string) (*tls.Config, error) {
-	f, err := os.Open(keyPath)
+	key, err := grant.LoadIdentity(keyPath)
 	if err != nil {
 		return nil, err
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(f, 4097))
-	_ = f.Close()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if len(raw) > 4096 {
-		return nil, errors.New("device key file exceeds size limit")
-	}
-	digest := sha256.Sum256(raw)
+	// The cache tag and certificate must describe the very same read, even
+	// if another process atomically rotates the device key during this call.
+	digest := sha256.Sum256(key)
 	tlsCacheMu.Lock()
 	if entry, ok := tlsCache[keyPath]; ok && entry.digest == digest {
 		tlsCacheMu.Unlock()
@@ -109,10 +103,6 @@ func cachedLocalTLS(keyPath string) (*tls.Config, error) {
 	}
 	tlsCacheMu.Unlock()
 
-	key, err := grant.LoadIdentity(keyPath)
-	if err != nil {
-		return nil, err
-	}
 	cfg, err := localTLS(key)
 	if err != nil {
 		return nil, err

@@ -86,24 +86,23 @@ func LookupPeer(keyPath, fingerprint, deviceName string) PeerCheck {
 	if len(peers) == 0 {
 		return PeerCheck{Trust: PeerNew}
 	}
-	if rec, ok := peers[fingerprint]; ok {
-		return PeerCheck{
-			Trust:        PeerKnown,
-			PreviousName: rec.Name,
-			LastSeen:     rec.LastSeen,
-		}
-	}
+	rec, known := peers[fingerprint]
 	trimmed := strings.TrimSpace(deviceName)
-	if trimmed != "" {
-		for fp, rec := range peers {
-			if strings.EqualFold(strings.TrimSpace(rec.Name), trimmed) {
-				return PeerCheck{
-					Trust:      PeerKeyMismatch,
-					ConflictID: ShortFingerprint(fp),
-					LastSeen:   rec.LastSeen,
-				}
+	if trimmed != "" && (!known || !strings.EqualFold(strings.TrimSpace(rec.Name), trimmed)) {
+		var conflictID string
+		var lastSeen time.Time
+		for fp, other := range peers {
+			if strings.EqualFold(strings.TrimSpace(other.Name), trimmed) &&
+				(conflictID == "" || other.LastSeen.After(lastSeen) || (other.LastSeen.Equal(lastSeen) && fp < conflictID)) {
+				conflictID, lastSeen = fp, other.LastSeen
 			}
 		}
+		if conflictID != "" {
+			return PeerCheck{Trust: PeerKeyMismatch, ConflictID: ShortFingerprint(conflictID), LastSeen: lastSeen}
+		}
+	}
+	if known {
+		return PeerCheck{Trust: PeerKnown, PreviousName: rec.Name, LastSeen: rec.LastSeen}
 	}
 	return PeerCheck{Trust: PeerNew}
 }

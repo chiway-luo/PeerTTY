@@ -30,7 +30,7 @@ const usage = `PeerTTY — peer-to-peer direct SSH for Windows, macOS and Linux
   peertty --version   显示程序版本
   peertty link        [-t] [-- 远端命令及参数] 打开已授权设备的 SSH 终端，-t 为命令分配交互终端
   peertty cp          [-r] <源路径>... <目标路径> 通过已授权直连传输文件（远端路径以 : 开头，如 :/var/log/syslog ./）
-  peertty sftp        [sftp 参数...] 通过已授权直连打开交互式 SFTP 文件传输
+  peertty sftp        [-b 批处理文件] [传输选项...] 通过已授权直连打开 SFTP
   peertty status      显示当前授权、剩余时间和终端数
   peertty revoke      结束本机当前授权及其所有 SSH 终端
   peertty doctor      [-stun auto|none|URL,URL] [-require-mapping]

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -52,5 +53,45 @@ func TestIdentityLayoutAndLegacyImport(t *testing.T) {
 		if got, err := Read(path, 64); err != nil || string(got) != want {
 			t.Fatalf("import overwrote %s: %q %v", path, got, err)
 		}
+	}
+}
+
+func TestReadRejectsRedirectedStateDirectory(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "settings.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := Path(filepath.Join(dir, "custom.key"), "settings.json")
+	if err := os.Symlink(other, filepath.Dir(path)); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if _, err := Read(path, 64); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("redirected state directory must be reported as unavailable: %v", err)
+	}
+}
+
+func TestSharedWritableStateIsUnavailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions")
+	}
+	path := Path(filepath.Join(t.TempDir(), "custom.key"), "known_peers.json")
+	if err := EnsureDir(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(path), 0770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(path, 64); err == nil {
+		t.Fatal("trusted state in a group-writable directory")
+	}
+	if err := Update(path, 64, func([]byte) ([]byte, error) { return []byte("changed"), nil }); err == nil {
+		t.Fatal("updated state in a group-writable directory")
 	}
 }

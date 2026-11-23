@@ -173,6 +173,9 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				}
 			default:
 				if st.Phase != "waiting" {
+					if isTicketText(item.text) {
+						t.notice("33", "!", "本次授权已绑定控制端，无法更换回执。")
+					}
 					break
 				}
 				if pending != nil {

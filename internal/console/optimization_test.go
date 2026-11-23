@@ -258,9 +258,15 @@ func TestTransferSCPAndSFTPArgs(t *testing.T) {
 	if got, err := scpArgs("/usr/bin/peertty", s, false, []string{":/tmp/file", "report:today.log"}); err != nil || got[len(got)-1] != "."+string(filepath.Separator)+"report:today.log" {
 		t.Fatalf("ambiguous local scp destination: %v, %v", got, err)
 	}
-	sftp := sftpArgs("/usr/bin/peertty", s, []string{"-b", "batch.txt"})
-	if sftp[len(sftp)-1] != "ops@peertty-abc" || !slices.Contains(sftp, "-b") || !slices.Contains(sftp, "StrictHostKeyChecking=yes") {
-		t.Fatalf("unexpected sftpArgs: %v", sftp)
+	sftp, err := sftpArgs("/usr/bin/peertty", s, []string{"-qv", "-B4096", "-b", "batch.txt"})
+	if err != nil || !slices.Equal(sftp[len(sftp)-6:], []string{"-qv", "-B4096", "-b", "batch.txt", "--", "ops@peertty-abc"}) ||
+		!slices.Contains(sftp, "StrictHostKeyChecking=yes") {
+		t.Fatalf("unexpected sftpArgs: %v, %v", sftp, err)
+	}
+	for _, opts := range [][]string{{"-D", "server"}, {"-qSprogram"}, {"-F", "config"}, {"-o", "BatchMode=yes"}, {"other-host"}, {"-b"}} {
+		if _, err := sftpArgs("/usr/bin/peertty", s, opts); err == nil {
+			t.Fatalf("accepted invalid grant transfer options: %v", opts)
+		}
 	}
 }
 

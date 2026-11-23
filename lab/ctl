@@ -248,6 +248,7 @@ def main():
                         help="keep both SSH windows open until the signed test grant expires")
     menu.set_defaults(ending="exit")
     menu.add_argument("--check-sudo", action="store_true", help="compare a read-only UID check over SSH with the target account's existing sudo policy")
+    menu.add_argument("--check-identity", action="store_true", help="check that a second controller identity cannot join the active grant")
     punch = cmd.add_parser("punch-check", help="test private endpoints across clean, lossy and UDP-blocked NATs")
     punch.add_argument("--binary", required=True, help="current Linux ARM64 binary")
     roam = cmd.add_parser("roam-check", help="switch each guest's active interface during one approved grant")
@@ -285,7 +286,8 @@ def main():
             binary = str(Path(args.binary).resolve(strict=True)) if args.binary else ""
             run([sys.executable, "-B", str(LAB / "menu_check.py"), active_profile()[1], binary,
                  "closed" if args.closed_ssh else "existing", args.ending, "0", "single", "open",
-                 *(["--check-sudo"] if args.check_sudo else [])])
+                 *(["--check-sudo"] if args.check_sudo else []),
+                 *(["--check-identity"] if args.check_identity else [])])
         elif args.action == "roam-check":
             binary = str(Path(args.binary).resolve(strict=True))
             original = active_profile()

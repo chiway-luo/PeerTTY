@@ -124,7 +124,7 @@ def cold_fixture(stack, operator, target, control_dir, binary):
     conf = (f"Port 22\nListenAddress 127.0.0.1\nHostKey /etc/ssh/ssh_host_ed25519_key\n"
             f"AuthorizedKeysFile .ssh/authorized_keys\nAllowUsers {username}\n"
             "PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
-            "PermitRootLogin no\nUsePAM yes\nDisableForwarding yes\n")
+            "PermitRootLogin no\nUsePAM yes\nDisableForwarding yes\nSubsystem sftp internal-sftp\n")
     command(target, "sudo", "-n", "tee", rootdir + "/sshd_config", input=conf)
     public_host = command(target, "cat", "/etc/ssh/ssh_host_ed25519_key.pub").split()[:2]
     prefix = ("sudo", "-n", "unshare", "--mount", "--propagation", "private", "sh", "-ec",
@@ -309,8 +309,73 @@ def check_roaming(guest, windows, dirs, programs, offer, answer):
     print("revocation after migration ended both workers and refused a new SSH terminal", flush=True)
 
 
+def check_third_identity(operator, target, dirs, programs, stun, username, invitation, approved, host, windows):
+    def shell_pids():
+        pids = []
+        for window in windows:
+            window.send("printf 'IDENTITY_PID=%s\\n' \"$$\"")
+            pids.append(window.expect(r"\nIDENTITY_PID=(\d+)\r?\n", 45)[1])
+        return pids
+
+    original = shell_pids()
+    if len(set(original)) != len(windows):
+        raise RuntimeError("expected independent authorized shells")
+    third_dir = f"{dirs[operator]}/third"
+    third_key = f"{third_dir}/config/PeerTTY/device.key"
+    command(operator, "mkdir", "-p", "-m", "700", f"{third_dir}/tmp")
+    with ExitStack() as processes:
+        binary = programs[operator]
+        processes.callback(subprocess.run, endpoint(operator, binary, "revoke", "-key", third_key),
+                           capture_output=True, timeout=20)
+        third = Menu(processes, operator, third_dir, binary,
+                     ["menu", "-stun", stun, "-ssh-config", "none", "-no-clipboard"])
+        third.expect("❯ ")
+        third.send("1", invitation, username)
+        if not approved.get("ssh_login_key"):
+            third.send("")  # The independent controller receives no SSH private key.
+        reply_path = third.expect(r"回执文件  ([^\r\n]+)\r?\n")[1]
+        reply_json = command(operator, "cat", reply_path)
+        claims = json.loads(reply_json)["claims"]
+        if (claims["issuer"] == approved["issuer"] or
+                any(claims[k] != approved[k] for k in ("device_name", "session", "offer_digest", "recipient"))):
+            raise RuntimeError("expected a different key on the same named machine answering the same invitation")
+        reply_text = third.ticket_text("回执文本", reply_json)
+        host.send("/host")
+        host.expect("被控会话已连接")
+        host.send(reply_text)
+        host.expect("本次授权已绑定控制端，无法更换回执")
+        host.send("b")
+        result = subprocess.run(endpoint(operator, binary, "link", "-key", third_key, "--", "id", "-un"),
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0 or result.stdout.strip() or "本机尚无已连接的控制授权" not in result.stderr:
+            raise RuntimeError("unapproved identity did not receive the expected terminal refusal")
+        if "等待被控方批准 · 0 个终端" not in command(operator, binary, "status", "-key", third_key):
+            raise RuntimeError("independent identity left its own pending grant")
+        trusted = json.loads(command(target, "cat", f"{dirs[target]}/config/PeerTTY/known_peers.json"))
+        approved_fp = "sha256:" + hashlib.sha256(base64.b64decode(approved["issuer"])).hexdigest()
+        if set(trusted) != {approved_fp}:
+            raise RuntimeError("host recorded an identity other than the approved controller")
+        if approved.get("ssh_login_key"):
+            owner_key = f"{dirs[operator]}/config/PeerTTY/device.key"
+            home = command(target, "getent", "passwd", username).split(":")[5]
+            for key in (third_key, owner_key):
+                batch = subprocess.run(endpoint(operator, binary, "sftp", "-key", key, "-b", "-"),
+                                       input="pwd\nquit\n", capture_output=True, text=True, timeout=100)
+                if key == owner_key:
+                    if batch.returncode or f"Remote working directory: {home}" not in batch.stdout:
+                        raise RuntimeError(f"authorized batch SFTP failed: {batch.stderr[-300:]}")
+                elif batch.returncode == 0 or batch.stdout.strip() or "本机尚无已连接的控制授权" not in batch.stderr:
+                    raise RuntimeError("unapproved identity did not receive the expected SFTP refusal")
+            print("scoped batch SFTP: independent identity refused; authorized identity read its home directory", flush=True)
+    host.expect_connected_terminals("被控端", 2)
+    if shell_pids() != original:
+        raise RuntimeError("an authorized shell changed during the identity check")
+    print(f"same-name third identity: replacement receipt refused, link exit {result.returncode}, "
+          f"0 terminals, only approved key trusted; original shell PIDs {', '.join(original)} continued", flush=True)
+
+
 def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open", verify_sudo=False,
-          roam=None, before_connect=False):
+          roam=None, before_connect=False, verify_identity=False):
     operator, target = ("device", "engineer") if cold else ("engineer", "device")
     nat = mode != "routed"
     failure = outcome in ("blocked", "incompatible")
@@ -332,7 +397,7 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                                env=dict(os.environ, LIMA_HOME=str(LAB / ".lima")), check=True, timeout=60)
                 command(role, "chmod", "700", dest)
                 programs[role] = dest
-        if roam:
+        if (roam or verify_identity) and artifact:
             digest = hashlib.sha256(Path(artifact).read_bytes()).hexdigest()
             if any(command(r, "sha256sum", p).split()[0] != digest for r, p in programs.items()):
                 raise RuntimeError("the lab guests did not receive the same local build")
@@ -492,6 +557,9 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             other.expect(r"\nSECOND_OK\r?\n", 100)
             device.expect_connected_terminals("被控端", 2)
             key = f"{e}/config/PeerTTY/device.key"
+            if verify_identity:
+                check_third_identity(operator, target, dirs, programs, STUN[operator] if nat else "none",
+                                     username, displayed, json.loads(answer_json)["claims"], device, (control, other))
             if before_connect:
                 result = command(operator, programs[operator], "link", "-key", key, "--", "ip -4 -o addr show dev roam0")
                 if "10.78.2.2/24" not in result or "换网直连" not in command(operator, programs[operator], "status", "-key", key):
@@ -579,4 +647,5 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
 
 if __name__ == "__main__":
     check(sys.argv[1], sys.argv[2], sys.argv[3] == "closed", sys.argv[4],
-          int(sys.argv[5]), sys.argv[6] == "fallback", sys.argv[7], "--check-sudo" in sys.argv[8:])
+          int(sys.argv[5]), sys.argv[6] == "fallback", sys.argv[7], "--check-sudo" in sys.argv[8:],
+          verify_identity="--check-identity" in sys.argv[8:])

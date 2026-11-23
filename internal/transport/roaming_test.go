@@ -42,31 +42,32 @@ func TestRoamingBindsKeysDirectionAndGrant(t *testing.T) {
 	data := []byte("ICE datagram")
 	wire := a.keys.Load().seal(pathData, data)
 	for _, receiver := range []*roaming{a, other} {
-		if _, _, ok := receiver.keys.Load().open(bytes.Clone(wire)); ok {
+		if _, ok := receiver.keys.Load().decrypt(bytes.Clone(wire)); ok {
 			t.Fatal("accepted reflected frame or another grant's key")
 		}
 	}
 	corrupt := bytes.Clone(wire)
 	corrupt[len(corrupt)-1] ^= 1
-	if _, _, ok := b.keys.Load().open(corrupt); ok {
+	if _, ok := b.keys.Load().decrypt(corrupt); ok {
 		t.Fatal("accepted modified frame")
 	}
 	wrongReceipt, err := newRoamCipher(b.key, base64.RawStdEncoding.EncodeToString(a.key.PublicKey().Bytes()), make([]byte, 64), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := wrongReceipt.open(bytes.Clone(wire)); ok {
+	if _, ok := wrongReceipt.decrypt(bytes.Clone(wire)); ok {
 		t.Fatal("accepted the same peer keys with a different signed receipt")
 	}
 	next := a.keys.Load().seal(pathData, data)
-	if _, _, ok := b.keys.Load().open(next); !ok {
+	receiver := b.keys.Load()
+	if frame, ok := receiver.decrypt(next); !ok || !receiver.accept(frame.seq) {
 		t.Fatal("new packet rejected")
 	}
-	kind, body, ok := b.keys.Load().open(bytes.Clone(wire))
-	if !ok || kind != pathData || !bytes.Equal(body, data) {
+	frame, ok := receiver.decrypt(wire)
+	if !ok || frame.kind != pathData || !bytes.Equal(frame.body, data) || !receiver.accept(frame.seq) {
 		t.Fatal("paired endpoint failed to open the frame")
 	}
-	if _, _, ok := b.keys.Load().open(wire); ok {
+	if receiver.accept(frame.seq) {
 		t.Fatal("accepted repeated frame")
 	}
 }
@@ -101,6 +102,12 @@ func TestRoamingRequiresReturnPathAndHonorsRevocation(t *testing.T) {
 		t.Fatal("valid path rejected")
 	}
 	wire := a.keys.Load().seal(pathData, []byte("data"))
+	// A delivery on a tuple that hasn't been validated must not advance the
+	// receiver's sequence window for the confirmed path.
+	b.receive(otherSource, bytes.Clone(wire))
+	if len(ice.queue) != 0 {
+		t.Fatal("unconfirmed tuple delivered data")
+	}
 	b.receive(physical, bytes.Clone(wire))
 	b.receive(physical, wire)
 	b.receive(otherSource, a.keys.Load().seal(pathData, []byte("unproved")))

@@ -51,6 +51,15 @@ func TestShortFingerprintAndKnownPeersTOFU(t *testing.T) {
 	if check := LookupPeer(keyPath, fpB, "other-host"); check.Trust != PeerNew {
 		t.Fatalf("distinct host check = %+v, want PeerNew", check)
 	}
+	if err := RecordPeer(keyPath, fpB, "other-host", now); err != nil {
+		t.Fatal(err)
+	}
+	if got := LookupPeer(keyPath, fpB, "LAB-HOST"); got.Trust != PeerKeyMismatch || got.ConflictID != shortA {
+		t.Fatalf("renamed known peer masked a name conflict: %+v", got)
+	}
+	if got := LookupPeer(keyPath, fpB, "new-name"); got.Trust != PeerKnown || got.PreviousName != "other-host" {
+		t.Fatalf("ordinary rename lost the known identity: %+v", got)
+	}
 }
 
 func TestTrustHistoryIsPreservedWhenLargeOrUnreadable(t *testing.T) {

@@ -151,22 +151,24 @@ func (r *roaming) receive(src wirePath, data []byte) {
 	if keys == nil {
 		return
 	}
-	kind, body, ok := keys.open(data)
-	if !ok || (kind != pathData && r.ctx.Err() != nil) {
+	frame, ok := keys.decrypt(data)
+	if !ok || (frame.kind != pathData && r.ctx.Err() != nil) {
 		return
 	}
+	body := frame.body
 	now := time.Now()
 	r.mu.Lock()
-	switch kind {
+	switch frame.kind {
 	case pathChallenge:
+		valid := len(body) == 16 && keys.accept(frame.seq)
 		r.mu.Unlock()
-		if len(body) == 16 {
+		if valid {
 			_ = src.send(keys, pathResponse, body)
 			r.challenge(src, now)
 		}
 	case pathResponse:
 		pending, found := r.challenges[src]
-		if found && len(body) == 16 && [16]byte(body) == pending.token && now.Sub(pending.issued) < pathLifetime {
+		if found && len(body) == 16 && [16]byte(body) == pending.token && now.Sub(pending.issued) < pathLifetime && keys.accept(frame.seq) {
 			delete(r.challenges, src)
 			if len(r.confirmed) < 64 || !r.confirmed[src].IsZero() {
 				r.confirmed[src] = now
@@ -185,8 +187,9 @@ func (r *roaming) receive(src wirePath, data []byte) {
 	case pathData:
 		_, verified := r.confirmed[src]
 		pair := r.logical
+		deliver := verified && pair.socket != nil && len(body) != 0 && keys.accept(frame.seq)
 		r.mu.Unlock()
-		if verified && pair.socket != nil && len(body) != 0 {
+		if deliver {
 			pair.socket.deliver(body, net.UDPAddrFromAddrPort(pair.addr))
 		}
 	default:

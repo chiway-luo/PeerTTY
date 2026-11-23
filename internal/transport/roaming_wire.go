@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
-	"sync"
 	"sync/atomic"
 
 	"github.com/pion/transport/v5/replaydetector"
@@ -31,8 +30,13 @@ const (
 type roamCipher struct {
 	send, receive cipher.AEAD
 	serial        atomic.Uint64
-	mu            sync.Mutex
 	replay        replaydetector.ReplayDetector
+}
+
+type roamFrame struct {
+	seq  uint64
+	kind byte
+	body []byte
 }
 
 func newRoamCipher(local *ecdh.PrivateKey, encoded string, receiptSignature []byte, offerer bool) (*roamCipher, error) {
@@ -83,22 +87,24 @@ func (c *roamCipher) seal(kind byte, body []byte) []byte {
 	return c.send.Seal(buf[:header], buf[:header], buf[header:], nil)
 }
 
-func (c *roamCipher) open(wire []byte) (byte, []byte, bool) {
+func (c *roamCipher) decrypt(wire []byte) (roamFrame, bool) {
 	const header = 12
 	if len(wire) < header+1+c.receive.Overhead() || string(wire[:4]) != roamMagic {
-		return 0, nil, false
+		return roamFrame{}, false
 	}
 	body, err := c.receive.Open(wire[header:header], wire[:header], wire[header:], nil)
 	if err != nil {
-		return 0, nil, false
+		return roamFrame{}, false
 	}
 	seq := binary.BigEndian.Uint64(wire[4:header])
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return roamFrame{seq: seq, kind: body[0], body: body[1:]}, seq != 0
+}
+
+// Called under the roaming mutex after the frame is valid for its source path.
+func (c *roamCipher) accept(seq uint64) bool {
 	accept, fresh := c.replay.Check(seq)
-	if !fresh || seq == 0 {
-		return 0, nil, false
+	if fresh {
+		accept()
 	}
-	accept()
-	return body[0], body[1:], true
+	return fresh
 }

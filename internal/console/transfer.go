@@ -120,10 +120,37 @@ func scpArgs(exe string, s active.State, recursive bool, paths []string) ([]stri
 	return append(args, expanded...), nil
 }
 
-func sftpArgs(exe string, s active.State, extra []string) []string {
+func sftpArgs(exe string, s active.State, extra []string) ([]string, error) {
+	// OpenSSH accepts grouped flags and attached values. Only forward options
+	// that leave the grant's destination, SSH program and credentials intact.
+	for i := 0; i < len(extra); i++ {
+		flags, option := strings.CutPrefix(extra[i], "-")
+		if !option || flags == "" {
+			return nil, errors.New("SFTP 目标由当前授权指定")
+		}
+		if flags == "-" && i == len(extra)-1 {
+			extra = extra[:i]
+			break
+		}
+		for j, flag := range flags {
+			if strings.ContainsRune("46aCfNpqrv", flag) {
+				continue
+			}
+			if !strings.ContainsRune("BbclRsX", flag) {
+				return nil, fmt.Errorf("当前授权不支持 SFTP 选项 -%c", flag)
+			}
+			if j+1 == len(flags) {
+				i++
+				if i == len(extra) || extra[i] == "" {
+					return nil, fmt.Errorf("SFTP 选项 -%c 缺少参数", flag)
+				}
+			}
+			break // The rest of this argument, or the next argument, is the value.
+		}
+	}
 	args := transferSSHOptions(exe, s)
 	args = append(args, extra...)
-	return append(args, s.User+"@"+s.Alias)
+	return append(args, "--", s.User+"@"+s.Alias), nil
 }
 
 // Copy transfers files over the active PeerTTY grant using native OpenSSH scp.
@@ -145,7 +172,7 @@ func SFTP(ctx context.Context, key string, in *os.File, out, diag io.Writer, ext
 		return err
 	}
 	return runTransfer(ctx, key, s, in, out, diag, "sftp", func(exe string) ([]string, error) {
-		return sftpArgs(exe, s, extra), nil
+		return sftpArgs(exe, s, extra)
 	}, (*exec.Cmd).Run)
 }
 

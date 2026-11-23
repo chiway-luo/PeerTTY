@@ -40,6 +40,56 @@ func TestLocalFramesStaySeparate(t *testing.T) {
 	}
 }
 
+func TestLocalTLSRejectsASeparateClientIdentity(t *testing.T) {
+	makeConfig := func() *tls.Config {
+		t.Helper()
+		_, key, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := localTLS(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	server := makeConfig()
+	for _, tc := range []struct {
+		name string
+		cfg  *tls.Config
+		want bool
+	}{{"owner", server.Clone(), true}, {"other identity", makeConfig(), false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both clients trust the real worker. Only the owner may authenticate to it.
+			tc.cfg.RootCAs = server.RootCAs
+			left, right := net.Pipe()
+			defer left.Close()
+			deadline := time.Now().Add(3 * time.Second)
+			left.SetDeadline(deadline)
+			right.SetDeadline(deadline)
+			done := make(chan error, 1)
+			go func() {
+				defer right.Close()
+				done <- tls.Server(right, server).HandshakeContext(t.Context())
+			}()
+			client := tls.Client(left, tc.cfg)
+			clientErr := client.HandshakeContext(t.Context())
+			_, _ = io.Copy(io.Discard, client)
+			err := <-done
+			if tc.want {
+				if err != nil || clientErr != nil {
+					t.Fatalf("owner handshake: client %v, server %v", clientErr, err)
+				}
+			} else {
+				var certErr *tls.CertificateVerificationError
+				if err == nil || (!errors.As(err, &certErr) && !strings.Contains(err.Error(), "client didn't provide a certificate")) {
+					t.Fatalf("expected server-side certificate refusal, got %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestLocalFrameBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -201,6 +251,19 @@ func TestWorkerAcceptsOneApprovalForTheCurrentGrant(t *testing.T) {
 	}
 	if res := callWorker(approval); res.Error == "" || len(w.approval) != 0 {
 		t.Fatal("duplicate approval accepted")
+	}
+	_, otherKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := grant.NewAnswer(otherKey, offer, "another controller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.update(func(s *State) { s.Phase = "ready" })
+	if res := callWorker(request{Op: "approve", ID: "current", Answer: &other}); res.Error == "" ||
+		w.snapshot().Phase != "ready" || len(w.approval) != 0 {
+		t.Fatal("second signed controller receipt changed an active grant")
 	}
 	// A reconnecting grant must still accept a local revoke without a peer
 	// transport. The old grant ID must not be able to stop another grant.
