@@ -69,9 +69,12 @@ def exchange(sender, receiver, directories, name):
 
 
 def cleanup(role, directory):
-    # The profile contains only this test grant and its role lock.
+    # Remove only the files this isolated SSH fixture can create.
     command(role, "sh", "-c",
-            'rm -f -- "$1/session.offer" "$1/session.answer" "$1/code" "$1/peertty" "$1/profile.peertty/grant.lock"; rmdir -- "$1/profile.peertty" 2>/dev/null || true; rmdir -- "$1"',
+            'state="$1/profile.peertty"; '
+            'rm -f -- "$1/session.offer" "$1/session.answer" "$1/code" "$1/peertty" '
+            '"$state/grant.lock" "$state/used-offers.json" "$state/used-offers.json.lock"; '
+            'rmdir -- "$state" 2>/dev/null || true; rmdir -- "$1"',
             "lab", directory)
 
 

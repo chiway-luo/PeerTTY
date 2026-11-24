@@ -247,6 +247,45 @@ def guest_clock(role):
     return wall, monotonic
 
 
+class GrantClockTrace:
+    """Sample in the guest to retain wall steps that disappear between menu actions."""
+
+    def __init__(self, stack, role, directory):
+        self.log = stack.enter_context(tempfile.TemporaryFile())
+        script = """
+import os, sys, time
+active = os.path.join(sys.argv[1], 'config/PeerTTY/device.key.active')
+end = time.monotonic() + 360
+seen = False
+while os.path.isdir(sys.argv[1]) and time.monotonic() < end:
+    live = os.path.exists(active)
+    wall = time.time_ns()
+    boot = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    print(int(live), wall, boot, time.monotonic_ns(), flush=True)
+    if seen and not live:
+        break
+    seen |= live
+    time.sleep(0.05)
+"""
+        process = subprocess.Popen(endpoint(role, "python3", "-c", script, directory),
+                                   stdin=subprocess.DEVNULL, stdout=self.log)
+        stack.callback(stop, process)
+
+    def offsets(self, expires_ms, mono_deadline_ms):
+        data = os.pread(self.log.fileno(), os.fstat(self.log.fileno()).st_size, 0)
+        rows = [tuple(map(int, line.split())) for line in data.split(b"\n")[:-1]]
+        live = [(wall, boot) for active, wall, boot, _ in rows if active]
+        if not live:
+            raise RuntimeError("no independent clock samples for the active grant")
+        # Only wall observations during an active lease may shorten its budget.
+        # Sample wall before boot so a descheduled probe cannot advance that bound.
+        peak = max(wall - boot for wall, boot in live)
+        _, wall, boot, mono = rows[-1]
+        return ((wall - expires_ms * 1_000_000) // 1_000_000,
+                mono // 1_000_000 - mono_deadline_ms,
+                (boot + peak - expires_ms * 1_000_000) // 1_000_000)
+
+
 def deadline_offsets(expires_ms, timers):
     # Lima can step the guest wall clocks while the already-armed OS timers run.
     offsets = {}
@@ -504,6 +543,7 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             device.expect(readiness)
             if ending == "expire":
                 device.expect(r"授权时长[^\r\n]+> ")
+                traces = {role: GrantClockTrace(processes, role, dirs[role]) for role in (target, operator)}
                 # The issuing worker starts its relative TTL after this input.
                 _, start = guest_clock(target)
                 timers = {target: start + EXPIRY_SECONDS * 1000}
@@ -663,8 +703,9 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 if other.process.wait(timeout=20) == 124:
                     raise RuntimeError("the lab timeout, not PeerTTY, closed the second terminal")
                 if ending == "expire":
-                    offsets = deadline_offsets(expires_ms, timers)
-                    print(f"guest clocks at disconnect (wall, monotonic ms from deadline): {offsets}", flush=True)
+                    offsets = {r: trace.offsets(expires_ms, timers[r]) for r, trace in traces.items()}
+                    print(f"guest clocks at disconnect (wall, monotonic, suspend-aware with wall steps; "
+                          f"ms from deadline): {offsets}", flush=True)
                     if all(max(pair) < 0 for pair in offsets.values()):
                         raise RuntimeError("the SSH terminals closed before either guest reached its deadline")
             for role in (operator, target):
@@ -674,6 +715,9 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                     if time.monotonic() >= until:
                         raise RuntimeError(f"{role} retained the ended grant")
                     time.sleep(0.3)
+                # The status listener closes before the worker finishes releasing its streams and lease.
+                command(role, "sh", "-c", 'exec 9<"$1" && flock -s -w 12 9',
+                        "lab", role_key + ".peertty/grant.lock")
             rejected = subprocess.run(endpoint(operator, programs[operator], "link", "-key", key, "--", "id"),
                                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=12)
             if rejected.returncode == 0 or "没有有效" not in rejected.stderr:
