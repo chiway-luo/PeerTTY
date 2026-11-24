@@ -26,6 +26,10 @@ func adminAction(message, label, path string, args ...string) Check {
 }
 
 func missingOpenSSH(server bool) Check {
+	return missingOpenSSHWith(server, runtime.GOOS, exec.LookPath, adminAction)
+}
+
+func missingOpenSSHWith(server bool, platform string, lookPath func(string) (string, error), action func(string, string, string, ...string) Check) Check {
 	role, deb, rpm := "客户端", "openssh-client", "openssh-clients"
 	note := ""
 	if server {
@@ -33,12 +37,12 @@ func missingOpenSSH(server bool) Check {
 		note = "。发行版安装服务端时可能同时启动系统 SSH 服务"
 	}
 	msg := "本机缺少 OpenSSH " + role
-	if runtime.GOOS == "linux" {
+	if platform == "linux" {
 		for _, manager := range []struct{ path, pkg string }{
 			{"/usr/bin/apt-get", deb}, {"/usr/bin/dnf", rpm}, {"/usr/bin/yum", rpm},
 		} {
-			if _, err := exec.LookPath(manager.path); err == nil {
-				return adminAction(msg+note+"。", "通过系统软件包管理器安装 OpenSSH "+role, manager.path, "install", manager.pkg)
+			if _, err := lookPath(manager.path); err == nil {
+				return action(msg+note+"。", "通过系统软件包管理器安装 OpenSSH "+role, manager.path, "install", manager.pkg)
 			}
 		}
 	}
@@ -147,14 +151,27 @@ func bindLoopback(port int, reuse bool) error {
 }
 
 func systemInstallRequired() Check {
+	return systemInstallRequiredWith(runtime.GOOS, exec.LookPath,
+		func(ctx context.Context, path string, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, path, args...).Output()
+		}, adminAction,
+		func(ctx context.Context, out io.Writer, path string, args ...string) error {
+			cmd := exec.CommandContext(ctx, path, args...)
+			cmd.Stdout, cmd.Stderr = out, out
+			return cmd.Run()
+		})
+}
+
+func systemInstallRequiredWith(platform string, lookPath func(string) (string, error), output func(context.Context, string, ...string) ([]byte, error),
+	action func(string, string, string, ...string) Check, run func(context.Context, io.Writer, string, ...string) error) Check {
 	check := Check{Message: "本机限制普通程序绑定 22 端口。临时 SSH 需要系统安装版 PeerTTY。"}
-	if runtime.GOOS != "darwin" {
+	if platform != "darwin" {
 		for _, pkg := range []struct{ manager, ext, query string }{
 			{"/usr/bin/apt-get", ".deb", "/usr/bin/dpkg-deb"},
 			{"/usr/bin/dnf", ".rpm", "/usr/bin/rpm"},
 			{"/usr/bin/yum", ".rpm", "/usr/bin/rpm"},
 		} {
-			if _, err := exec.LookPath(pkg.manager); err != nil {
+			if _, err := lookPath(pkg.manager); err != nil {
 				continue
 			}
 			check.Action = "从本地 " + pkg.ext + " 安装系统版 PeerTTY"
@@ -167,11 +184,11 @@ func systemInstallRequired() Check {
 				if pkg.ext == ".rpm" {
 					query = []string{"-qp", "--queryformat", "%{NAME}", path}
 				}
-				name, err := exec.CommandContext(ctx, pkg.query, query...).Output()
+				name, err := output(ctx, pkg.query, query...)
 				if err != nil || strings.TrimSpace(string(name)) != "peertty" {
 					return errors.New("这个文件不是可读取的 PeerTTY 安装包")
 				}
-				return adminAction("", "", pkg.manager, "install", path).Apply(ctx, in, out, "")
+				return action("", "", pkg.manager, "install", path).Apply(ctx, in, out, "")
 			}
 			return check
 		}
@@ -181,8 +198,8 @@ func systemInstallRequired() Check {
 	check.Action = "选择 PeerTTY 安装包并打开 macOS 安装器"
 	check.Detail = "请选择本版 PeerTTY-macOS.pkg。系统安装只添加程序，完成后关闭安装器，菜单会自动复查。"
 	check.Apply = func(ctx context.Context, _ *os.File, out io.Writer, _ string) error {
-		data, err := exec.CommandContext(ctx, "/usr/bin/osascript", "-e",
-			`POSIX path of (choose file with prompt "选择 PeerTTY-macOS.pkg" of type {"com.apple.installer-package-archive", "com.apple.installer-package", "com.apple.installer-flat-package"})`).Output()
+		data, err := output(ctx, "/usr/bin/osascript", "-e",
+			`POSIX path of (choose file with prompt "选择 PeerTTY-macOS.pkg" of type {"com.apple.installer-package-archive", "com.apple.installer-package", "com.apple.installer-flat-package"})`)
 		if err != nil {
 			return err
 		}
@@ -190,27 +207,29 @@ func systemInstallRequired() Check {
 		if !filepath.IsAbs(pkg) || !strings.EqualFold(filepath.Ext(pkg), ".pkg") {
 			return errors.New("请选择本地的 PeerTTY macOS 安装包")
 		}
-		cmd := exec.CommandContext(ctx, "/usr/bin/open", "-W", "-n", "-b", "com.apple.installer", pkg)
-		cmd.Stdout, cmd.Stderr = out, out
-		return cmd.Run()
+		return run(ctx, out, "/usr/bin/open", "-W", "-n", "-b", "com.apple.installer", pkg)
 	}
 	return check
 }
 
 func unixConfigProblem(log string) Check {
+	return unixConfigProblemFor(log, runtime.GOOS, os.Geteuid(), adminAction)
+}
+
+func unixConfigProblemFor(log, platform string, uid int, action func(string, string, string, ...string) Check) Check {
 	const runtimeDir = "/run/sshd"
 	switch {
 	case strings.Contains(log, "no hostkeys available"):
-		if runtime.GOOS == "darwin" {
+		if platform == "darwin" {
 			return Check{Message: "本机 22 端口已关闭，系统 SSH 当前没有可用的主机密钥。"}
 		}
-		return adminAction("OpenSSH 缺少可用的主机密钥。", "生成缺失的系统默认 SSH 主机密钥", "/usr/bin/ssh-keygen", "-A")
-	case runtime.GOOS == "linux" && (strings.HasSuffix(log, "Missing privilege separation directory: /run/sshd") ||
+		return action("OpenSSH 缺少可用的主机密钥。", "生成缺失的系统默认 SSH 主机密钥", "/usr/bin/ssh-keygen", "-A")
+	case platform == "linux" && (strings.HasSuffix(log, "Missing privilege separation directory: /run/sshd") ||
 		strings.HasSuffix(log, "Missing privilege separation directory: /var/run/sshd")):
-		return adminAction("OpenSSH 缺少系统运行目录。", "创建 /run/sshd 运行目录", "/usr/bin/mkdir", "-m", "0755", "--", runtimeDir)
+		return action("OpenSSH 缺少系统运行目录。", "创建 /run/sshd 运行目录", "/usr/bin/mkdir", "-m", "0755", "--", runtimeDir)
 	case strings.Contains(log, "not in the sudoers") || strings.Contains(log, "not allowed to execute"):
 		return Check{Message: "本机账号没有准备临时 SSH 的管理员权限。", Detail: "可请本机管理员操作，或选择已有 SSH 服务的端口。"}
-	case os.Geteuid() != 0 && strings.Contains(log, "sudo:"):
+	case uid != 0 && strings.Contains(log, "sudo:"):
 		return systemAction("本机 22 端口已关闭，检查临时 OpenSSH 需要本机管理员授权。",
 			"使用系统提示验证管理员权限", "/usr/bin/sudo", "-v")
 	default:

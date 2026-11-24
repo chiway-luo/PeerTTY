@@ -194,3 +194,86 @@ func TestCancelUnblocksTheWireAndLocalReader(t *testing.T) {
 		t.Fatal("local reader still open", err)
 	}
 }
+
+type failingStreamEndpoint struct {
+	*memoryEndpoint
+	writeErr, halfErr error
+}
+
+func (e failingStreamEndpoint) Write([]byte) (int, error) { return 0, e.writeErr }
+func (e failingStreamEndpoint) CloseWrite() error         { return e.halfErr }
+
+type bridgeWriterError struct {
+	*memoryChannel
+	err error
+}
+
+func (c bridgeWriterError) WriteDataChannel([]byte, bool) (int, error) { return 0, c.err }
+
+func TestBridgePropagatesEndpointAndACKFailures(t *testing.T) {
+	failure := errors.New("test stream failure")
+	cases := []struct {
+		name                      string
+		rec                       record
+		writeErr, halfErr, ackErr error
+		ackCalls                  int
+	}{
+		{name: "endpoint write", rec: record{data: "output"}, writeErr: failure},
+		{name: "half close", rec: record{data: "FIN", control: true}, halfErr: failure},
+		{name: "acknowledgement write", rec: record{data: "FIN", control: true}, ackErr: failure, ackCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := newMemoryChannel()
+			wire.in <- tc.rec
+			end := failingStreamEndpoint{&memoryEndpoint{}, tc.writeErr, tc.halfErr}
+			var ackCalls int
+			err := receive(wire, end, func(p []byte, text bool) error {
+				ackCalls++
+				if string(p) != "ACK" || !text {
+					t.Fatal("invalid acknowledgement")
+				}
+				return tc.ackErr
+			}, new(atomic.Bool))
+			if !errors.Is(err, failure) || ackCalls != tc.ackCalls {
+				t.Fatalf("got err=%v, acknowledgements=%d", err, ackCalls)
+			}
+		})
+	}
+}
+
+func TestBridgeDoesNotLoseSenderWriteError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	failure := errors.New("test send failure")
+	end := &memoryEndpoint{ReadCloser: io.NopCloser(bytes.NewBufferString("payload"))}
+	wire := bridgeWriterError{newMemoryChannel(), failure}
+	if err := Run(ctx, wire, end); !errors.Is(err, failure) {
+		t.Fatalf("got %v, want %v", err, failure)
+	}
+}
+
+func TestBridgePreCanceledContextClosesEndpoint(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	wire := newMemoryChannel()
+	reader := &trackedEndpointReader{Reader: bytes.NewReader(nil)}
+	if err := Run(ctx, wire, &memoryEndpoint{ReadCloser: reader}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled bridge returned %v", err)
+	}
+	if !reader.closed {
+		t.Fatal("canceled bridge left its endpoint open")
+	}
+	select {
+	case <-wire.reading:
+		t.Fatal("canceled bridge read from channel")
+	default:
+	}
+}
+
+type trackedEndpointReader struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackedEndpointReader) Close() error { r.closed = true; return nil }

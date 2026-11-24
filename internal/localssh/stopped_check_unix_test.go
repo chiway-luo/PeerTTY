@@ -79,3 +79,50 @@ func TestClosedHostChecksScopedPolicyBeforeOfferingSessionLogin(t *testing.T) {
 		t.Fatalf("accepted a failed account policy: %+v", st)
 	}
 }
+
+func TestScopedSSHFallbackRequiresSuccessfulLocalPreflight(t *testing.T) {
+	networkErr := errors.New("fixture bind unavailable")
+	checkErr := errors.New("configured authentication unavailable")
+	for _, tc := range []struct {
+		name, log             string
+		euid                  int
+		bind, session         error
+		wantScoped            bool
+		wantBind, wantSession int
+	}{
+		{name: "sudo prompt permits scoped preflight", log: "sudo: a password is required", euid: 501, wantScoped: true, wantBind: 1, wantSession: 1},
+		{name: "privileged account cannot use scoped preflight", log: "no hostkeys available", wantScoped: false},
+		{name: "unexpected diagnostic is not a reason to change authentication", log: "invalid system config", euid: 501},
+		{name: "failed local bind", log: "no hostkeys available", euid: 501, bind: networkErr, wantBind: 1},
+		{name: "policy rejected", log: "sudo: a password is required", euid: 501, session: checkErr, wantBind: 1, wantSession: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var bind, session int
+			p := stoppedCheck{
+				stat:         func() error { return nil },
+				euid:         func() int { return tc.euid },
+				hasGuard:     func() bool { return true },
+				bind:         func() error { bind++; return tc.bind },
+				checkConfig:  func(context.Context) (string, error) { return tc.log, checkErr },
+				checkSession: func(context.Context) error { session++; return tc.session },
+			}
+			got := p.run(t.Context())
+			if got.ScopedOnly != tc.wantScoped || got.Ready != tc.wantScoped || bind != tc.wantBind || session != tc.wantSession {
+				t.Fatalf("ready=%v scoped=%v; bind=%d session=%d", got.Ready, got.ScopedOnly, bind, session)
+			}
+		})
+	}
+}
+
+func TestConfigurationAdviceDistinguishesPolicyRefusalFromPasswordPrompt(t *testing.T) {
+	for _, log := range []string{"user not in the sudoers", "not allowed to execute sshd"} {
+		got := unixConfigProblem(log)
+		if got.Ready || got.Apply != nil || !strings.Contains(got.Message, "管理员权限") {
+			t.Fatalf("permission refusal produced a privileged action: %+v", got)
+		}
+	}
+	got := unixConfigProblem("sudo: a password is required")
+	if got.Ready || (got.Apply != nil) != (os.Geteuid() != 0) {
+		t.Fatalf("privilege prompt misclassified: %+v", got)
+	}
+}

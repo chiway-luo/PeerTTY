@@ -58,15 +58,19 @@ func dial(ctx context.Context, addr string) (*net.TCPConn, error) {
 // Open is called only after the local owner has approved the signed answer and
 // ICE has selected the peer. Only a refused default port triggers activation.
 func Open(ctx context.Context, port int) (*Conn, error) {
+	return openWith(ctx, port, dial, activate)
+}
+
+func openWith(ctx context.Context, port int, connect func(context.Context, string) (*net.TCPConn, error), start func(context.Context, string) (*Conn, error)) (*Conn, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	c, err := dial(ctx, addr)
+	c, err := connect(ctx, addr)
 	if err == nil {
 		return &Conn{TCPConn: c}, nil
 	}
 	if port != 22 || !errors.Is(err, refused) || ctx.Err() != nil {
 		return nil, fmt.Errorf("连接本机 SSH %s: %w", addr, err)
 	}
-	return activate(ctx, addr)
+	return start(ctx, addr)
 }
 
 type guard struct {
@@ -120,13 +124,17 @@ func (d *diagnosticTail) Write(p []byte) (int, error) {
 }
 
 func (g *guard) close() error {
+	return g.closeWith(func() error { return g.process.Kill() })
+}
+
+func (g *guard) closeWith(kill func() error) error {
 	g.once.Do(func() { _ = g.input.Close() })
 	select {
 	case <-g.done:
 		return g.err
 	case <-time.After(4 * time.Second):
 	}
-	err := g.process.Kill()
+	err := kill()
 	select {
 	case <-g.done:
 		return errors.Join(err, g.err)
@@ -282,6 +290,10 @@ func readSSHBannerReplay(c *net.TCPConn, deadline time.Time) (io.Reader, error) 
 // Serve runs in a dedicated local process. Closing the parent's private pipe
 // cancels startup or the active server, including on abnormal parent exit.
 func Serve(parent context.Context, args []string, in io.Reader, out io.Writer) error {
+	return serveWith(parent, args, in, out, serveLocal)
+}
+
+func serveWith(parent context.Context, args []string, in io.Reader, out io.Writer, run func(context.Context, <-chan int, io.Writer, string, string) error) error {
 	var mode, dir string
 	if len(args) == 3 && (args[1] == "login-open" || args[1] == "login-closed") {
 		mode, dir = args[1], args[2]
@@ -307,7 +319,7 @@ func Serve(parent context.Context, args []string, in io.Reader, out io.Writer) e
 		}
 		cancel()
 	}()
-	return serveLocal(ctx, ports, out, mode, dir)
+	return run(ctx, ports, out, mode, dir)
 }
 
 func peerPort(ctx context.Context, ports <-chan int, out io.Writer, ready string) (int, error) {

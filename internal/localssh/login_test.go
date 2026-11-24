@@ -169,3 +169,45 @@ func TestDiagnosticTailKeepsMostRecentBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestExistingUserKeyPolicyRequiresLocalKeysAndUsableSession(t *testing.T) {
+	const config = "authorizedkeysfile .ssh/authorized_keys\nauthenticationmethods any\npubkeyauthentication yes\nmaxsessions 1\n"
+	for _, tc := range []struct {
+		name, old, new string
+		want           bool
+	}{
+		{"ordinary restrictive default", "", "", true},
+		{"home expansion", ".ssh/authorized_keys", "%h/.ssh/authorized_keys", true},
+		{"explicit public key", "any", "publickey", true},
+		{"central keys only", ".ssh/authorized_keys", "/etc/ssh/knownkeys", false},
+		{"key path absent", "authorizedkeysfile .ssh/authorized_keys", "authorizedkeysfile ", false},
+		{"combined authentication", "any", "publickey,password", false},
+		{"no key auth", "pubkeyauthentication yes", "pubkeyauthentication no", false},
+		{"no sessions", "maxsessions 1", "maxsessions 0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := strings.Replace(config, tc.old, tc.new, 1)
+			if err := checkUserKeyPolicy([]byte(doc)); (err == nil) != tc.want {
+				t.Fatalf("check=%v, want acceptance=%v", err, tc.want)
+			}
+		})
+	}
+	if err := checkUserKeyPolicy(nil); err == nil {
+		t.Fatal("accepted unverifiable policy")
+	}
+}
+
+func TestPinLoginHostRejectsMalformedKeyWithoutReplacingFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "known_hosts")
+	const previous = "existing pin"
+	if err := os.WriteFile(file, []byte(previous), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PinLoginHost(file, "temporary", nil); err == nil {
+		t.Fatal("pinned a missing key")
+	}
+	got, err := os.ReadFile(file)
+	if err != nil || string(got) != previous {
+		t.Fatalf("pin changed on validation failure: %q %v", got, err)
+	}
+}

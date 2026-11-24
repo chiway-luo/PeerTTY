@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 )
 
 const refused = syscall.ECONNREFUSED
@@ -74,15 +76,31 @@ func nativeSSHD(ctx context.Context, mode string) *exec.Cmd {
 }
 
 func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir string) error {
-	if _, err := os.Stat(sshd); err != nil {
+	lc := net.ListenConfig{}
+	return serveLocalWith(ctx, ports, out, mode, dir, localServeServices{
+		stat: os.Stat, listen: lc.Listen, owner: loginOwner, verify: verifyLoginSSHD,
+		check: (*exec.Cmd).CombinedOutput, run: runLocalSSHD,
+	})
+}
+
+type localServeServices struct {
+	stat   func(string) (os.FileInfo, error)
+	listen func(context.Context, string, string) (net.Listener, error)
+	owner  func(string) (*user.User, *syscall.Credential, error)
+	verify func(context.Context, string, string, *syscall.Credential, int) error
+	check  func(*exec.Cmd) ([]byte, error)
+	run    func(context.Context, *exec.Cmd, *os.File, io.Writer) error
+}
+
+func serveLocalWith(ctx context.Context, ports <-chan int, out io.Writer, mode, dir string, services localServeServices) error {
+	if _, err := services.stat(sshd); err != nil {
 		return fmt.Errorf("请在被控机安装并初始化 OpenSSH Server: %w", err)
 	}
-	lc := net.ListenConfig{}
 	addr := "127.0.0.1:22"
 	if mode == "login-open" {
 		addr = "127.0.0.1:0"
 	}
-	listener, err := lc.Listen(ctx, "tcp4", addr)
+	listener, err := services.listen(ctx, "tcp4", addr)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return fmt.Errorf("当前程序无权绑定回环 22 端口，请在主菜单选 5 准备本机或选择已有 SSH 服务的端口: %w", err)
@@ -96,18 +114,18 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	defer cancel()
 	server := nativeSSHD(ctx, "-i")
 	if mode != "" {
-		account, cred, err := loginOwner(dir)
+		account, cred, err := services.owner(dir)
 		if err != nil {
 			return err
 		}
 		// Also evaluate the real destination port for Match LocalPort rules.
-		if err := verifyLoginSSHD(start, dir, account.Username, cred, listener.Addr().(*net.TCPAddr).Port); err != nil {
+		if err := services.verify(start, dir, account.Username, cred, listener.Addr().(*net.TCPAddr).Port); err != nil {
 			return err
 		}
 		server = loginSSHD(ctx, dir, cred, "-i", "-e")
 	} else {
 		check := nativeSSHD(start, "-t")
-		if msg, err := check.CombinedOutput(); err != nil {
+		if msg, err := services.check(check); err != nil {
 			return fmt.Errorf("请核对被控机的 OpenSSH Server 配置、主机密钥与本机管理员权限: %w", cmdError(check, err, string(msg)))
 		}
 	}
@@ -121,30 +139,38 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 	}
 	ln := listener.(*net.TCPListener)
 	until, _ := start.Deadline()
-	if err := ln.SetDeadline(until); err != nil {
+	socket, err := acceptLocalSocket(ln, port, until)
+	if err != nil {
 		return err
 	}
-	var socket *os.File
+	// inetd mode receives exactly this already-connected socket. No second
+	// local client can reach the temporary OpenSSH server.
+	ln.Close()
+	return services.run(ctx, server, socket, out)
+}
+
+func acceptLocalSocket(ln *net.TCPListener, port int, until time.Time) (*os.File, error) {
+	if err := ln.SetDeadline(until); err != nil {
+		return nil, err
+	}
 	for {
 		conn, err := ln.AcceptTCP()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		remote := conn.RemoteAddr().(*net.TCPAddr)
 		if remote.Port != port || !remote.IP.Equal(net.IPv4(127, 0, 0, 1)) {
 			conn.Close()
 			continue
 		}
-		socket, err = conn.File()
+		socket, err := conn.File()
 		conn.Close()
-		if err != nil {
-			return err
-		}
-		break
+		return socket, err
 	}
-	// inetd mode receives exactly this already-connected socket. No second
-	// local client can reach the temporary OpenSSH server.
-	ln.Close()
+}
+
+// runLocalSSHD owns the accepted descriptor and reaps the per-connection child.
+func runLocalSSHD(ctx context.Context, server *exec.Cmd, socket *os.File, out io.Writer) error {
 	server.Stdin, server.Stdout, server.Stderr = socket, socket, os.Stderr
 	if err := server.Start(); err != nil {
 		socket.Close()
@@ -156,7 +182,7 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 		server.Wait()
 		return err
 	}
-	err = server.Wait()
+	err := server.Wait()
 	if ctx.Err() != nil {
 		return nil
 	}

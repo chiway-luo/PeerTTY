@@ -75,3 +75,38 @@ func TestGuardHandshakeRequiresExpectedStatus(t *testing.T) {
 		t.Fatalf("canceled wait: %v", err)
 	}
 }
+
+func TestOwnershipConfirmationRetriesAndPropagatesReadFailure(t *testing.T) {
+	cause := errors.New("fixture inspection failed")
+	if err := waitForOwnedConnection(t.Context(), nil, nil, func() (bool, error) { return true, cause }); !errors.Is(err, cause) {
+		t.Fatalf("inspection error lost: %v", err)
+	}
+	exited := make(chan struct{})
+	close(exited)
+	if err := waitForOwnedConnection(t.Context(), exited, nil, func() (bool, error) { return true, nil }); err == nil || !strings.Contains(err.Error(), "退出") {
+		t.Fatalf("accepted a match from an exited helper: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	tick := make(chan time.Time, 1)
+	tick <- time.Now()
+	attempts := 0
+	if err := waitForOwnedConnection(ctx, nil, tick, func() (bool, error) {
+		attempts++
+		return attempts == 2, nil
+	}); err != nil || attempts != 2 {
+		t.Fatalf("retry: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestDiagnosticTailPreservesOnlyMostRecentBytes(t *testing.T) {
+	var d diagnosticTail
+	for _, block := range []string{"prefix", strings.Repeat("a", 2048), "tail"} {
+		if n, err := d.Write([]byte(block)); n != len(block) || err != nil {
+			t.Fatalf("wrote %d bytes, err=%v", n, err)
+		}
+	}
+	if want := strings.Repeat("a", 2044) + "tail"; string(d) != want {
+		t.Fatalf("tail length=%d, suffix preserved=%t", len(d), bytes.HasSuffix(d, []byte("tail")))
+	}
+}

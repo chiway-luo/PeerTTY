@@ -22,11 +22,15 @@ var accountName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`)
 // PrepareLogin runs as the local approver. The private directory is under
 // their actual home so OpenSSH StrictModes can verify all parent directories.
 func PrepareLogin(ctx context.Context) (*Login, error) {
-	account, err := user.Current()
+	return prepareLoginWith(ctx, user.Current, os.Geteuid, verifyLoginSSHD)
+}
+
+func prepareLoginWith(ctx context.Context, current func() (*user.User, error), euid func() int, verify func(context.Context, string, string, *syscall.Credential, int) error) (*Login, error) {
+	account, err := current()
 	if err != nil {
 		return nil, err
 	}
-	if os.Geteuid() == 0 || !accountName.MatchString(account.Username) {
+	if euid() == 0 || !accountName.MatchString(account.Username) {
 		return nil, errors.New("此账号使用系统 SSH 登录")
 	}
 	if strings.ContainsAny(account.HomeDir, "%\"\\\r\n") {
@@ -41,7 +45,7 @@ func PrepareLogin(ctx context.Context) (*Login, error) {
 	if err == nil {
 		probe, cancel := context.WithTimeout(ctx, startupTimeout)
 		defer cancel()
-		err = verifyLoginSSHD(probe, dir, account.Username, nil, 22)
+		err = verify(probe, dir, account.Username, nil, 22)
 	}
 	if err != nil {
 		return nil, errors.Join(err, s.Close())
@@ -52,13 +56,17 @@ func PrepareLogin(ctx context.Context) (*Login, error) {
 // Root may bind 22 for a normal user. It never starts sshd with root rights
 // and never opens any key or configuration path supplied by that user.
 func loginOwner(dir string) (*user.User, *syscall.Credential, error) {
-	account, err := user.Current()
-	if os.Geteuid() == 0 {
-		uid := os.Getenv("SUDO_UID")
+	return loginOwnerWith(dir, os.Geteuid(), func() string { return os.Getenv("SUDO_UID") }, user.Current, user.LookupId, (*user.User).GroupIds)
+}
+
+func loginOwnerWith(dir string, euid int, invokingUID func() string, current func() (*user.User, error), lookup func(string) (*user.User, error), groupIDs func(*user.User) ([]string, error)) (*user.User, *syscall.Credential, error) {
+	account, err := current()
+	if euid == 0 {
+		uid := invokingUID()
 		if uid == "" || uid == "0" {
 			return nil, nil, errors.New("本次登录需要普通账号在本机批准")
 		}
-		account, err = user.LookupId(uid)
+		account, err = lookup(uid)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -68,7 +76,7 @@ func loginOwner(dir string) (*user.User, *syscall.Credential, error) {
 		!strings.HasPrefix(filepath.Base(dir), ".peertty-session-") {
 		return nil, nil, errors.New("本次登录目录不属于批准账号")
 	}
-	if os.Geteuid() != 0 {
+	if euid != 0 {
 		return account, nil, nil
 	}
 	uid, err := strconv.ParseUint(account.Uid, 10, 32)
@@ -79,7 +87,7 @@ func loginOwner(dir string) (*user.User, *syscall.Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	ids, err := account.GroupIds()
+	ids, err := groupIDs(account)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -104,6 +112,10 @@ func loginSSHD(ctx context.Context, dir string, cred *syscall.Credential, mode .
 }
 
 func verifyLoginSSHD(ctx context.Context, dir, account string, cred *syscall.Credential, port int) error {
+	return verifyLoginSSHDWith(ctx, dir, account, cred, port, (*exec.Cmd).Output)
+}
+
+func verifyLoginSSHDWith(ctx context.Context, dir, account string, cred *syscall.Credential, port int, output func(*exec.Cmd) ([]byte, error)) error {
 	match := func(n int) string {
 		return fmt.Sprintf("user=%s,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=%d", account, n)
 	}
@@ -113,7 +125,7 @@ func verifyLoginSSHD(ctx context.Context, dir, account string, cred *syscall.Cre
 	}
 	var baseDiag bytes.Buffer
 	base.Stderr = &baseDiag
-	original, err := base.Output()
+	original, err := output(base)
 	if err != nil {
 		msg := strings.TrimSpace(baseDiag.String())
 		if strings.Contains(strings.ToLower(msg), "permission denied") && strings.Contains(msg, "sshd_config") {
@@ -127,12 +139,12 @@ func verifyLoginSSHD(ctx context.Context, dir, account string, cred *syscall.Cre
 	if port != 22 {
 		actual := exec.CommandContext(ctx, sshd, "-T", "-h", filepath.Join(dir, "host.key"), "-C", match(port))
 		actual.SysProcAttr = base.SysProcAttr
-		rules, err := actual.Output()
+		rules, err := output(actual)
 		if err != nil || !bytes.Equal(original, rules) {
 			return errors.New("本机对不同 SSH 端口设有独立策略，请使用系统 SSH 认证")
 		}
 	}
-	config, err := loginSSHD(ctx, dir, cred, "-T", "-C", match(port)).Output()
+	config, err := output(loginSSHD(ctx, dir, cred, "-T", "-C", match(port)))
 	if err != nil {
 		return fmt.Errorf("OpenSSH 无法启用本次账号公钥登录: %w", err)
 	}

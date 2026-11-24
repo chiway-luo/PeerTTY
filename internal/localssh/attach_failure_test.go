@@ -19,6 +19,9 @@ func TestAttachmentStartupFailuresDoNotLeaveAHelper(t *testing.T) {
 	}{
 		{"missing", "127.0.0.1:0", "启动本机 OpenSSH"},
 		{"bad ephemeral port", "127.0.0.1:0", "没有返回有效回环端口"},
+		{"missing readiness prefix", "127.0.0.1:0", "没有返回有效回环端口"},
+		{"zero ephemeral port", "127.0.0.1:0", "没有返回有效回环端口"},
+		{"ephemeral guard exits cleanly", "127.0.0.1:0", "本机 SSH 启动进程已退出"},
 		{"guard exits", "127.0.0.1:1", "fixture startup error"},
 		{"guard reports error", "127.0.0.1:1", "fixture no service"},
 	}
@@ -57,6 +60,12 @@ func TestAttachmentFailureHelper(t *testing.T) {
 	switch os.Getenv("PEERTTY_TEST_ATTACHMENT_FAILURE") {
 	case "bad ephemeral port":
 		fmt.Fprintln(os.Stdout, "READY 65536")
+	case "missing readiness prefix":
+		fmt.Fprintln(os.Stdout, "installation in progress")
+	case "zero ephemeral port":
+		fmt.Fprintln(os.Stdout, "READY 0")
+	case "ephemeral guard exits cleanly":
+		os.Exit(0)
 	case "guard exits":
 		fmt.Fprintln(os.Stderr, "fixture startup error")
 		os.Exit(2)
