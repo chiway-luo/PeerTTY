@@ -113,3 +113,37 @@ func TestActivityPreservesInputAndPlainTranscript(t *testing.T) {
 		}
 	}
 }
+
+func TestSingleUseReceiptCancelsWhenParentEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out bytes.Buffer
+	c := Console{out: &out}
+	exit := make(chan struct{})
+	err := c.singleUseReceipt(ctx, active.State{Role: "control", Phase: "waiting"}, true, func(ctx context.Context, _ func(grant.Ticket) error, _ func(string)) error {
+		defer close(exit)
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) || strings.Contains(out.String(), "控制会话已连接") || c.activity != "" {
+		t.Fatalf("canceled receipt: %v, %q", err, out.String())
+	}
+	select {
+	case <-exit:
+	default:
+		t.Fatal("receipt returned before its worker stopped")
+	}
+}
+
+func TestSingleUseReceiptReportsPublicationFailureWithoutReadiness(t *testing.T) {
+	_, out := sshMenuInput(t, "")
+	c := Console{out: out}
+	st := active.State{Role: "control", Phase: "gathering", Exchange: filepath.Join(t.TempDir(), "missing", "answer")}
+	err := c.singleUseReceipt(t.Context(), st, true, func(_ context.Context, publish func(grant.Ticket) error, _ func(string)) error {
+		return publish(grant.Ticket{Claims: grant.Claims{Kind: "answer"}})
+	})
+	if err == nil || strings.Contains(out.String(), "控制会话已连接") || strings.Contains(out.String(), ticketBegin) {
+		t.Fatalf("failed write was announced as ready: %v, %q", err, out.String())
+	}
+}

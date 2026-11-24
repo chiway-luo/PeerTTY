@@ -64,7 +64,11 @@ func printStatus(out io.Writer, s active.State) {
 }
 
 func DisplayStatus(ctx context.Context, key string, out io.Writer) error {
-	s, err := active.Status(ctx, key)
+	return displayStatusWith(ctx, key, out, active.Status)
+}
+
+func displayStatusWith(ctx context.Context, key string, out io.Writer, status func(context.Context, string) (active.State, error)) error {
+	s, err := status(ctx, key)
 	if errors.Is(err, active.ErrInactive) {
 		fmt.Fprintln(out, active.ErrInactive)
 		if reason, at, ok := active.LastError(key); ok {
@@ -83,11 +87,15 @@ func DisplayStatus(ctx context.Context, key string, out io.Writer) error {
 }
 
 func EndGrant(ctx context.Context, key string, out io.Writer) error {
-	s, err := active.Status(ctx, key)
+	return endGrantWith(ctx, key, out, active.Status, active.Revoke)
+}
+
+func endGrantWith(ctx context.Context, key string, out io.Writer, status func(context.Context, string) (active.State, error), revoke func(context.Context, string, string) error) error {
+	s, err := status(ctx, key)
 	if err != nil {
 		return err
 	}
-	if err = active.Revoke(ctx, key, s.ID); err != nil {
+	if err = revoke(ctx, key, s.ID); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "本次授权已撤销。")
@@ -143,18 +151,24 @@ func (t *Console) linkSSH(ctx context.Context, s active.State) error {
 	})
 	if err != nil && ctx.Err() == nil {
 		fresh, statusErr := active.Status(ctx, t.KeyPath)
-		switch {
-		case errors.Is(statusErr, active.ErrInactive) || statusErr == nil && fresh.ID != s.ID:
-			return fmt.Errorf("SSH 会话已断开，本次授权已结束 · %w", err)
-		case statusErr == nil && fresh.Phase == "disconnected":
-			return reconnectingGrant{id: s.ID}
-		case statusErr == nil && fresh.Phase == "offline":
-			return fmt.Errorf("SSH 会话已断开 · %s · %w", fresh.Note, err)
-		case statusErr == nil && fresh.Phase == "ready":
-			var exit *exec.ExitError
-			if errors.As(err, &exit) && exit.ExitCode() == 255 {
-				return fmt.Errorf("SSH 连接中断或未能建立。输入 /link 再次连接本次授权的设备 · %w", err)
-			}
+		return describeLinkExit(s.ID, err, fresh, statusErr)
+	}
+	return err
+}
+
+// describeLinkExit pairs the original OpenSSH error with the latest local grant status.
+func describeLinkExit(id string, err error, fresh active.State, statusErr error) error {
+	switch {
+	case errors.Is(statusErr, active.ErrInactive) || statusErr == nil && fresh.ID != id:
+		return fmt.Errorf("SSH 会话已断开，本次授权已结束 · %w", err)
+	case statusErr == nil && fresh.Phase == "disconnected":
+		return reconnectingGrant{id: id}
+	case statusErr == nil && fresh.Phase == "offline":
+		return fmt.Errorf("SSH 会话已断开 · %s · %w", fresh.Note, err)
+	case statusErr == nil && fresh.Phase == "ready":
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 255 {
+			return fmt.Errorf("SSH 连接中断或未能建立。输入 /link 再次连接本次授权的设备 · %w", err)
 		}
 	}
 	return err
@@ -234,8 +248,12 @@ func watchSSHConnection(ctx context.Context, id string, diag io.Writer, tick <-c
 	}
 }
 
-func linkSSH(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, command RemoteCommand, run func(*exec.Cmd) error) (result error) {
-	status := func(ctx context.Context) (active.State, error) { return active.Status(ctx, key) }
+func linkSSH(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, command RemoteCommand, run func(*exec.Cmd) error) error {
+	return linkSSHWithStatus(ctx, key, s, in, out, diag, command, run,
+		func(ctx context.Context) (active.State, error) { return active.Status(ctx, key) })
+}
+
+func linkSSHWithStatus(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, command RemoteCommand, run func(*exec.Cmd) error, status func(context.Context) (active.State, error)) (result error) {
 	if s.Role == "control" && s.Phase == "disconnected" {
 		if terminalFile(diag) {
 			fmt.Fprintln(diag, reconnectRevokeHint)

@@ -48,12 +48,19 @@ func Start(ctx context.Context, opts Options) (State, error) {
 	go func() { ready <- receive(read, &result) }()
 	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()
+	return awaitWorkerStart(ctx, timer.C, ready, &result)
+}
+
+// The result is read only after ready delivers, which synchronizes the worker's
+// prefetched reply with the caller.
+func awaitWorkerStart(ctx context.Context, timeout <-chan time.Time, ready <-chan error, result *reply) (State, error) {
+	var state State
 	select {
 	case <-ctx.Done():
 		return state, ctx.Err()
-	case <-timer.C:
+	case <-timeout:
 		return state, errors.New("后台授权进程启动超时")
-	case err = <-ready:
+	case err := <-ready:
 		if err != nil {
 			return state, fmt.Errorf("无法启动后台授权进程: %w", err)
 		}

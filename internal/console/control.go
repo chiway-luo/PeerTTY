@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,13 +56,24 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 		return err
 	}
 	defer lease.Close()
-	key, err := grant.LoadIdentity(h.Key)
-	if err != nil {
-		return err
-	}
 	offer, err := grant.Read(h.Offer)
 	if err != nil {
 		return err
+	}
+	codePath := h.Offer + ".pair"
+	code, err := grant.ReadPairingCode(codePath)
+	if err != nil {
+		return err
+	}
+	if err = os.Remove(codePath); err != nil {
+		return err
+	}
+	var key ed25519.PrivateKey
+	if offer.Pinned() {
+		key, err = grant.LoadIdentity(h.Key)
+		if err != nil {
+			return err
+		}
 	}
 	panel := &Console{out: log, autoCopy: h.Copy, section: "控制端回执"}
 	if h.Interactive && terminalFile(log) {
@@ -71,7 +83,7 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 		}
 	}
 	st := active.State{Role: "control", Phase: "gathering", Deadline: offer.Deadline(), Exchange: h.Answer}
-	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN}
+	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN, PairingCode: code}
 	return panel.singleUseReceipt(ctx, st, h.Text, func(ctx context.Context, publish func(grant.Ticket) error, ready func(string)) error {
 		return session.RunControl(ctx, cfg, offer, end, publish, func(route string) {
 			close(connected)
@@ -88,11 +100,21 @@ func proxyCommand(exe, platform, command string) string {
 	return `ProxyCommand="$PEERTTY_CONSOLE_PROGRAM" ` + command
 }
 
-func (t *Console) control(ctx context.Context, invitation string) (result error) {
+type controllerServices struct {
+	check  func() localssh.Check
+	status func(context.Context, string) (active.State, error)
+	start  func(context.Context, active.Options) (active.State, error)
+}
+
+func (t *Console) control(ctx context.Context, invitation string) error {
+	return t.controlWith(ctx, invitation, controllerServices{localssh.CheckClient, active.Status, active.Start})
+}
+
+func (t *Console) controlWith(ctx context.Context, invitation string, services controllerServices) (result error) {
 	if !t.terminalUI() {
 		fmt.Fprintln(t.out, "控制设备 · 输入 q 返回")
 	}
-	if err := t.checkSSH(ctx, false, localssh.CheckClient); err != nil {
+	if err := t.checkSSH(ctx, false, services.check); err != nil {
 		return err
 	}
 	var err error
@@ -114,14 +136,20 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	if err != nil {
 		return err
 	}
-	peer := grant.Fingerprint(offer.Claims.Issuer)
-	if peer == t.fingerprint {
-		return errors.New("这份邀请来自本机，请粘贴对方发来的邀请")
+	peer := offer.Sender()
+	if offer.Pinned() {
+		var profile ed25519.PrivateKey
+		profile, err = grant.LoadIdentity(t.KeyPath)
+		if err == nil {
+			err = offer.VerifyOffer(peer, grant.Fingerprint(profile.Public().(ed25519.PublicKey)), time.Now())
+		}
+	} else {
+		err = offer.VerifyOpenOffer(time.Now())
 	}
-	if err = offer.VerifyOffer(peer, t.fingerprint, time.Now()); err != nil {
+	if err != nil {
 		return fmt.Errorf("邀请校验失败，请对方重新发送本次邀请 · %w", err)
 	}
-	if st, statusErr := active.Status(ctx, t.KeyPath); statusErr == nil {
+	if st, statusErr := services.status(ctx, t.KeyPath); statusErr == nil {
 		if st.Role == "control" && st.Exchange != "" {
 			answer, err := grant.Read(st.Exchange)
 			if err != nil {
@@ -135,8 +163,19 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	} else if !errors.Is(statusErr, active.ErrInactive) {
 		return statusErr
 	}
+	input, err := t.prompt(ctx, "输入被控方通过可信渠道单独提供的一次性配对码 > ")
+	if err != nil {
+		return err
+	}
+	code, err := grant.ParsePairingCode(input)
+	if err != nil {
+		return err
+	}
+	if err = code.VerifyProof(offer); err != nil {
+		return err
+	}
 	t.notice("32", "✓", fmt.Sprintf("邀请签名已核验，有效至 %s。", offer.Deadline().Local().Format("15:04:05")))
-	showPeerIdentity(t.out, "被控设备", t.KeyPath, offer.Claims.Issuer, offer.Claims.DeviceName)
+	showSessionIdentity(t.out, "被控设备", offer.Claims.Issuer, offer.Claims.DeviceName)
 	suggested := offer.Claims.SSHUser
 	if len(offer.Claims.SSHHostKey) > 0 && validSSHUser(suggested) {
 		fmt.Fprintf(t.out, "回车使用本次授权登录 %s，输入 /ssh 可改用已有的 SSH 凭据。\n", suggested)
@@ -184,7 +223,7 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 		}
 	}
 	if offer.Reusable() {
-		st, err := active.Start(ctx, active.Options{Role: "control", Key: t.KeyPath, STUN: t.STUN, User: user, Identity: identity, SSHConfig: t.SSHConfig, Offer: offer, Scoped: scoped})
+		st, err := services.start(ctx, active.Options{Role: "control", Key: t.KeyPath, STUN: t.STUN, User: user, Identity: identity, SSHConfig: t.SSHConfig, Offer: offer, Scoped: scoped, PairingCode: code})
 		if err != nil {
 			return err
 		}
@@ -201,6 +240,9 @@ func (t *Console) control(ctx context.Context, invitation string) (result error)
 	defer func() { result = errors.Join(result, os.RemoveAll(dir)) }()
 	h := handoff{Key: t.KeyPath, Peer: peer, Offer: filepath.Join(dir, "received.offer"), Answer: filepath.Join(dir, "session.answer"), STUN: t.STUN, Text: isTicketText(invitation), Copy: t.autoCopy, Interactive: t.interactive}
 	if err = offer.WriteNew(h.Offer); err != nil {
+		return err
+	}
+	if err = os.WriteFile(h.Offer+".pair", []byte(code), 0600); err != nil {
 		return err
 	}
 	alias := "peertty-" + strings.TrimPrefix(peer, "sha256:")

@@ -115,6 +115,10 @@ func (t *Console) drawMenu(v terminalView, page menuPage, s active.State, err er
 // Only the home and status pages follow the grant while waiting for a command.
 // Reuse the pending read so a refresh or an expired grant cannot consume input.
 func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error) {
+	return t.menuChoiceWith(ctx, page, active.Status)
+}
+
+func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func(context.Context, string) (active.State, error)) (string, error) {
 	v := t.view()
 	if page == resultPage {
 		return t.ask(ctx, v.commandPrompt(false, false))
@@ -122,7 +126,7 @@ func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error)
 	var last active.State
 	var statusErr error
 	if page != helpPage {
-		last, statusErr = active.Status(ctx, t.KeyPath)
+		last, statusErr = status(ctx, t.KeyPath)
 	}
 	t.setActivity(waitLabel(last))
 	defer t.setActivity("")
@@ -160,7 +164,7 @@ func (t *Console) menuChoice(ctx context.Context, page menuPage) (string, error)
 			nextView := t.view()
 			s, err := last, statusErr
 			if page != helpPage {
-				s, err = active.Status(ctx, t.KeyPath)
+				s, err = status(ctx, t.KeyPath)
 				if err != nil && !errors.Is(err, active.ErrInactive) {
 					s, err = last, statusErr
 				}

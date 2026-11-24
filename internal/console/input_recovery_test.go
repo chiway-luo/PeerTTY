@@ -49,3 +49,23 @@ func TestCancelledPromptHandsItsPendingInputToNextPrompt(t *testing.T) {
 		t.Fatalf("replacement prompt = %q, %v", got, err)
 	}
 }
+
+func TestReadLineCapsFramedPasteAndRecoversAtNextEntry(t *testing.T) {
+	input := strings.NewReader(pasteStart + strings.Repeat("x", maxPaste+1) + pasteEnd + "\nnext\n")
+	if got, err := readLine(input); got != "" || !errors.Is(err, oversizePaste) {
+		t.Fatalf("oversized paste returned %q, %v", got, err)
+	}
+	if got, err := readLine(input); got != "next" || err != nil {
+		t.Fatalf("oversized paste consumed next line: %q, %v", got, err)
+	}
+}
+
+func TestReadLineRejectsPartialEndMarkerWithoutConsumingNextEntry(t *testing.T) {
+	input := strings.NewReader(pasteStart + "before\x1b[20" + pasteEnd + "\nnext\n")
+	if got, err := readLine(input); got != "" || !errors.Is(err, incompletePaste) {
+		t.Fatalf("overlapping end marker returned %q, %v", got, err)
+	}
+	if got, err := readLine(input); got != "next" || err != nil {
+		t.Fatalf("malformed paste consumed next line: %q, %v", got, err)
+	}
+}

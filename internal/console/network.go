@@ -18,7 +18,17 @@ func serverList(urls []string) string {
 	return strings.Join(urls, ", ")
 }
 
+type networkChecks struct {
+	candidates func(context.Context, string) (transport.Candidates, error)
+	nat        func(context.Context, string) (transport.NATReport, error)
+	upnp       func(context.Context) (string, bool)
+}
+
 func NetworkCheck(ctx context.Context, out io.Writer, spec string, requireMapping bool) error {
+	return networkChecks{transport.CheckNetwork, transport.ProbeNAT, transport.CheckUPnP}.run(ctx, out, spec, requireMapping)
+}
+
+func (checks networkChecks) run(ctx context.Context, out io.Writer, spec string, requireMapping bool) error {
 	urls, err := transport.STUNServers(spec)
 	if err != nil {
 		return err
@@ -36,17 +46,17 @@ func NetworkCheck(ctx context.Context, out io.Writer, spec string, requireMappin
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		candidates, candErr = transport.CheckNetwork(ctx, spec)
+		candidates, candErr = checks.candidates(ctx, spec)
 	}()
 	if len(urls) > 0 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			natReport, _ = transport.ProbeNAT(ctx, spec)
+			natReport, _ = checks.nat(ctx, spec)
 		}()
 		go func() {
 			defer wg.Done()
-			upnpInfo, hasUPnP = transport.CheckUPnP(ctx)
+			upnpInfo, hasUPnP = checks.upnp(ctx)
 		}()
 	}
 	wg.Wait()

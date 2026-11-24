@@ -4,7 +4,6 @@ package console
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -34,8 +33,6 @@ type Console struct {
 	Settings
 	in              *os.File
 	out             io.Writer
-	key             ed25519.PrivateKey
-	fingerprint     string
 	pending         chan line
 	pasteTTY        *os.File
 	interactive     bool
@@ -69,11 +66,6 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 			return err
 		}
 		opts.KeyPath = filepath.Join(opts.StateDir, "device.key")
-		if _, err := os.Stat(opts.KeyPath); errors.Is(err, os.ErrNotExist) {
-			if _, err = grant.NewIdentity(opts.KeyPath); err != nil && !errors.Is(err, os.ErrExist) {
-				return err
-			}
-		}
 	}
 	path, err := filepath.Abs(opts.KeyPath)
 	if err != nil {
@@ -86,20 +78,13 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 			return err
 		}
 	}
-	key, err := grant.LoadIdentity(path)
-	if err != nil {
-		return err
-	}
 	if opts.StateDir != "" {
 		if err := importDirectorySettings(path); err != nil {
 			return err
 		}
-		if err := grant.ImportDirectoryPeers(path); err != nil {
-			return err
-		}
 	}
 	applySavedSettings(&opts)
-	t := &Console{Settings: opts, in: in, out: out, key: key, fingerprint: grant.Fingerprint(key.Public().(ed25519.PublicKey))}
+	t := &Console{Settings: opts, in: in, out: out}
 	t.pasteTTY = pasteTerminal(in, out)
 	t.interactive = terminalFile(in) && terminalFile(out)
 	t.autoCopy = t.interactive && !opts.NoClipboard
@@ -111,14 +96,26 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 	return err
 }
 
+type menuGrantActions struct {
+	status  func(context.Context, string) (active.State, error)
+	control func(context.Context, string) error
+	panel   func(context.Context, active.State, bool, bool) error
+	link    func(context.Context, active.State) error
+	revoke  func(context.Context, string, string) error
+}
+
 func (t *Console) menu(ctx context.Context) error {
+	return t.menuWithGrantActions(ctx, menuGrantActions{active.Status, t.control, t.controlPanel, t.linkSSH, active.Revoke})
+}
+
+func (t *Console) menuWithGrantActions(ctx context.Context, actions menuGrantActions) error {
 	closeScreen := t.openScreen()
 	defer closeScreen()
 	defer t.finishEntry()
 	page := homePage
 	var reconnectID string
 	for ctx.Err() == nil {
-		choice, err := t.menuChoice(ctx, page)
+		choice, err := t.menuChoiceWith(ctx, page, actions.status)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -134,24 +131,24 @@ func (t *Console) menu(ctx context.Context) error {
 		case "/quit":
 			return nil
 		case "/connect":
-			if s, e := active.Status(ctx, t.KeyPath); e == nil && s.Role == "control" {
-				err = t.waitControl(ctx, s, false)
+			if s, e := actions.status(ctx, t.KeyPath); e == nil && s.Role == "control" {
+				err = actions.panel(ctx, s, false, false)
 			} else {
-				err = t.control(ctx, "")
+				err = actions.control(ctx, "")
 			}
 		case "/link":
 			var s active.State
-			if s, err = active.Status(ctx, t.KeyPath); err == nil {
-				err = t.linkSSH(ctx, s)
+			if s, err = actions.status(ctx, t.KeyPath); err == nil {
+				err = actions.link(ctx, s)
 			}
 			if err == nil && t.terminalUI() {
 				page = homePage
 			}
 		case "/receipt":
 			var s active.State
-			if s, err = active.Status(ctx, t.KeyPath); err == nil {
+			if s, err = actions.status(ctx, t.KeyPath); err == nil {
 				if s.Role == "control" {
-					err = t.controlPanel(ctx, s, false, true)
+					err = actions.panel(ctx, s, false, true)
 				} else {
 					err = errors.New("请在本次授权的控制端查看回执")
 				}
@@ -162,7 +159,7 @@ func (t *Console) menu(ctx context.Context) error {
 			if selectedReconnect == "" {
 				err = EndGrant(ctx, t.KeyPath, t.pageOut())
 			} else {
-				err = active.Revoke(ctx, t.KeyPath, selectedReconnect)
+				err = actions.revoke(ctx, t.KeyPath, selectedReconnect)
 				if err == nil {
 					t.line("本次授权已撤销。")
 				}
@@ -196,7 +193,7 @@ func (t *Console) menu(ctx context.Context) error {
 		default:
 			if isTicketText(choice) || clipboardChoice(command) {
 				t.section = connectAction.title
-				err = t.control(ctx, command)
+				err = actions.control(ctx, command)
 			} else {
 				t.section = "命令"
 				t.notice("33", "!", "输入 /help 查看命令，或直接粘贴邀请。")
@@ -236,9 +233,9 @@ func (t *Console) settings(ctx context.Context) error {
 	if t.terminalUI() {
 		v := t.view()
 		t.line(v.muted("生效范围  ") + "保存为默认设置")
-		t.line(v.muted("设备密钥  ") + t.KeyPath)
+		t.line(v.muted("本地配置  ") + t.KeyPath)
 	} else {
-		fmt.Fprintf(t.out, "连接设置（保存为默认设置）\n设备密钥  %s\n", t.KeyPath)
+		fmt.Fprintf(t.out, "连接设置（保存为默认设置）\n本地配置  %s\n", t.KeyPath)
 	}
 	urls, _ := transport.STUNServers(t.STUN)
 	v, err := t.prompt(ctx, fmt.Sprintf("STUN [%s]\n回车保留，auto 使用默认服务，none 关闭，多个地址用英文逗号分隔 > ", serverList(urls)))

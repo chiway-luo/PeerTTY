@@ -112,7 +112,10 @@ func TestNativeSSHProxyExit(t *testing.T) {
 		finished <- session.Host(ctx, session.HostOptions{
 			Options: session.Options{Key: key, Peer: operatorID, OfferPath: filepath.Join(dir, "test.offer"), Status: io.Discard},
 			TTL:     time.Minute, SSHPort: listener.Addr().(*net.TCPAddr).Port,
-			Approval: func(ctx context.Context) (string, error) {
+			Approval: func(ctx context.Context, code grant.PairingCode) (string, error) {
+				if err := os.WriteFile(filepath.Join(dir, "test.code"), []byte(code), 0600); err != nil {
+					return "", err
+				}
 				close(offered)
 				tick := time.NewTicker(10 * time.Millisecond)
 				defer tick.Stop()
@@ -138,7 +141,7 @@ func TestNativeSSHProxyExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := fmt.Sprintf(`ProxyCommand="%s" connect -stun none -key engineer.key -peer %s -offer test.offer -answer test.answer`, bin, hostID)
+	proxy := fmt.Sprintf(`ProxyCommand="%s" connect -stun none -key engineer.key -peer %s -offer test.offer -answer test.answer -code-file test.code`, bin, hostID)
 	cmd := exec.CommandContext(ctx, sshPath, "-F", "ssh.conf", "-o", "ControlPath=none", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=known_hosts",
 		"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", proxy, "-i", "login.key", "-tt", "fixture@peertty-fixture", "marker")
 	cmd.Dir = dir
@@ -237,7 +240,7 @@ func TestLinkCommandStdoutAndExitCode(t *testing.T) {
 	dir := t.TempDir()
 	host := filepath.Join(dir, "host.key")
 	client := filepath.Join(dir, "client.key")
-	fp, err := grant.NewIdentity(host)
+	_, err := grant.NewIdentity(host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,10 +266,6 @@ func TestLinkCommandStdoutAndExitCode(t *testing.T) {
 	signer, _ := ssh.NewSignerFromKey(hostPriv)
 	cfg.AddHostKey(signer)
 	known := filepath.Join(dir, "known_hosts")
-	alias := "peertty-" + strings.TrimPrefix(fp, "sha256:")
-	if err = localssh.PinLoginHost(known, alias, hostPub); err != nil {
-		t.Fatal(err)
-	}
 	conf := filepath.Join(dir, "ssh.conf")
 	if err = os.WriteFile(conf, []byte("Host *\n BatchMode yes\n StrictHostKeyChecking yes\n UserKnownHostsFile \""+filepath.ToSlash(known)+"\"\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -309,7 +308,11 @@ func TestLinkCommandStdoutAndExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start(active.Options{Role: "control", Key: client, Offer: offer, User: "fixture", Identity: identity, SSHConfig: conf})
+	alias := "peertty-" + strings.TrimPrefix(grant.Fingerprint(offer.Claims.Issuer), "sha256:")
+	if err = localssh.PinLoginHost(known, alias, hostPub); err != nil {
+		t.Fatal(err)
+	}
+	start(active.Options{Role: "control", Key: client, Offer: offer, PairingCode: h.PairingCode, User: "fixture", Identity: identity, SSHConfig: conf})
 	c := wait(client, "waiting")
 	answer, err := grant.Read(c.Exchange)
 	if err != nil {

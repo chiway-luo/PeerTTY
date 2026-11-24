@@ -255,6 +255,9 @@ func TestMenuUsesIdentityInInvitation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := fixtureCode.Seal(&offer); err != nil {
+		t.Fatal(err)
+	}
 	var invitation strings.Builder
 	if err = writeTicketText(&invitation, offer); err != nil {
 		t.Fatal(err)
@@ -272,16 +275,19 @@ func TestMenuUsesIdentityInInvitation(t *testing.T) {
 	go func() { done <- Run(ctx, Settings{StateDir: dir, TTL: time.Minute, SSHPort: 22}, in, log) }()
 
 	// Try a bracketed menu paste, then an invitation at the role prompt.
-	fmt.Fprint(keys, pasteStart, invitation.String(), pasteEnd, "\n\nq\n1\n", invitation.String(), "other-user\nq\n")
+	fmt.Fprint(keys, pasteStart, invitation.String(), pasteEnd, "\n", fixtureCode, "\n\nq\n1\n", invitation.String(), fixtureCode, "\nother-user\nq\n")
 	// A targeted v1 invitation is accepted only by its named recipient.
 	old, err := grant.NewOffer(host, self, "legacy", time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := fixtureCode.Seal(&old); err != nil {
+		t.Fatal(err)
+	}
 	if err = writeTicketText(keys, old); err != nil {
 		t.Fatal(err)
 	}
-	fmt.Fprint(keys, "q\n")
+	fmt.Fprint(keys, fixtureCode, "\nq\n")
 	offer.Claims.SDP += "tampered"
 	if err = writeTicketText(keys, offer); err != nil {
 		t.Fatal(err)
@@ -363,8 +369,8 @@ func TestMenuReplacesPages(t *testing.T) {
 	}
 	want := []string{
 		"点对点远程终端", "关闭菜单", "当前没有有效", "点对点远程终端",
-		"设备密钥", "本机 SSH 端口 [22]", "请输入 1–65535", "连接设置已应用",
-		"设备密钥", "点对点远程终端", "操作结束", "点对点远程终端",
+		"本地配置", "本机 SSH 端口 [22]", "请输入 1–65535", "连接设置已应用",
+		"本地配置", "点对点远程终端", "操作结束", "点对点远程终端",
 	}
 	if len(pages) != len(want) {
 		t.Fatalf("got %d pages, want %d: %q", len(pages), len(want), pages)
@@ -459,3 +465,5 @@ func TestDurationScreenNoticesWhenSSHCloses(t *testing.T) {
 		t.Fatal("duration screen kept the old SSH status")
 	}
 }
+
+const fixtureCode grant.PairingCode = "00000000-11111111-22222222-33333333"

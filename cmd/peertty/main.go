@@ -7,9 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -37,23 +39,31 @@ const usage = `PeerTTY — peer-to-peer direct SSH for Windows, macOS and Linux
   peertty menu        [-state-dir DIR | -key DEVICE.key] [-stun stun:host:3478] [-ttl 1h] [-ssh-port 22] [-ssh-config FILE]
   peertty keygen      -out DEVICE.key
   peertty fingerprint -key DEVICE.key
-  peertty host        -key HOST.key -peer OPERATOR_FINGERPRINT -offer SESSION.offer [-ttl 10m] [-ssh-port 22] [-stun stun:host:3478]
-  peertty connect     -key OPERATOR.key -peer HOST_FINGERPRINT -offer SESSION.offer -answer SESSION.answer [-stun stun:host:3478]
+  peertty host        -offer SESSION.offer [-key HOST.key -peer OPERATOR_FINGERPRINT] [-ttl 10m] [-ssh-port 22] [-stun stun:host:3478]
+  peertty connect     -offer SESSION.offer -answer SESSION.answer -code-file PRIVATE_FILE [-key OPERATOR.key -peer HOST_FINGERPRINT] [-stun stun:host:3478]
 
 Use connect as an OpenSSH ProxyCommand. Each offer and answer needs a new filename.`
 
 func main() {
-	ctx, stop := commandContext(os.Args[1:])
-	err := run(ctx, os.Args[1:])
+	args := os.Args[1:]
+	ctx, stop := commandContext(args)
+	err := run(ctx, args)
 	stop()
+	if code := exitCode(args, err, os.Stderr); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func exitCode(args []string, err error, diag io.Writer) int {
 	if err != nil && !errors.Is(err, flag.ErrHelp) {
 		var exit *exec.ExitError
-		if len(os.Args) > 1 && (os.Args[1] == "link" || os.Args[1] == "cp" || os.Args[1] == "sftp") && errors.As(err, &exit) && exit.ExitCode() > 0 {
-			os.Exit(exit.ExitCode())
+		if len(args) > 0 && (args[0] == "link" || args[0] == "cp" || args[0] == "sftp") && errors.As(err, &exit) && exit.ExitCode() > 0 {
+			return exit.ExitCode()
 		}
-		fmt.Fprintln(os.Stderr, "peertty:", err)
-		os.Exit(1)
+		fmt.Fprintln(diag, "peertty:", err)
+		return 1
 	}
+	return 0
 }
 
 func commandContext(args []string) (context.Context, func()) {
@@ -64,23 +74,25 @@ func commandContext(args []string) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-hup:
-		}
-		// OpenSSH sends SIGHUP to its ProxyCommand at normal exit. Its pipes
-		// are closing; give the bridge a bounded window to deliver FIN/ACK.
-		timer := time.NewTimer(bridge.ProxyDrainTimeout)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-		case <-timer.C:
-			cancel()
-		}
-	}()
+	go waitProxyDrain(ctx, hup, bridge.ProxyDrainTimeout, cancel)
 	return ctx, func() { signal.Stop(hup); cancel(); stop() }
+}
+
+// OpenSSH sends SIGHUP to its ProxyCommand at normal exit. Its pipes
+// are closing; give the bridge a bounded window to deliver FIN/ACK.
+func waitProxyDrain(ctx context.Context, hup <-chan os.Signal, grace time.Duration, cancel context.CancelFunc) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-hup:
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+		cancel()
+	}
 }
 
 // The leading PeerTTY identity flags belong to this process. From the first
@@ -137,8 +149,8 @@ func run(ctx context.Context, args []string) error {
 	case "_link-proxy":
 		return console.LinkProxy(ctx, os.Stdin, os.Stdout)
 	case "link", "cp", "sftp", "status", "revoke":
-		dir := fs.String("state-dir", "", "设备身份目录")
-		key := fs.String("key", "", "已有设备密钥")
+		dir := fs.String("state-dir", "", "本地配置目录")
+		key := fs.String("key", "", "本地配置路径")
 		var remote console.RemoteCommand
 		var recursive bool
 		if args[0] == "link" {
@@ -179,8 +191,8 @@ func run(ctx context.Context, args []string) error {
 		return localssh.Serve(ctx, args[1:], os.Stdin, os.Stdout)
 	case "menu":
 		opts := console.Settings{Version: version}
-		fs.StringVar(&opts.StateDir, "state-dir", "", "用户私有的设备身份目录")
-		fs.StringVar(&opts.KeyPath, "key", "", "使用已有设备密钥")
+		fs.StringVar(&opts.StateDir, "state-dir", "", "用户私有的配置目录")
+		fs.StringVar(&opts.KeyPath, "key", "", "使用指定的本地配置路径")
 		fs.StringVar(&opts.STUN, "stun", "auto", "auto 使用默认 STUN，可指定逗号分隔的地址或 none")
 		fs.StringVar(&opts.SSHConfig, "ssh-config", "", "控制端的 OpenSSH 配置文件")
 		fs.IntVar(&opts.SSHPort, "ssh-port", 22, "被控端回环 SSH 端口")
@@ -259,35 +271,52 @@ func runSession(ctx context.Context, command string, fs *flag.FlagSet, parse fun
 	fs.StringVar(&opts.Peer, "peer", "", "expected peer fingerprint")
 	fs.StringVar(&opts.OfferPath, "offer", "", "signed offer file")
 	fs.StringVar(&opts.STUN, "stun", "auto", "STUN discovery: auto, none, or comma-separated STUN URLs")
-	var answer string
+	var answer, codeFile string
 	if command == "host" {
 		fs.DurationVar(&opts.TTL, "ttl", 10*time.Minute, "grant duration, including pairing")
 		fs.IntVar(&opts.SSHPort, "ssh-port", 22, "local loopback SSH service port")
 	} else {
 		fs.StringVar(&answer, "answer", "", "new signed answer file")
+		fs.StringVar(&codeFile, "code-file", "", "private file containing this invitation's separately received pairing code")
 	}
 	if err := parse(); err != nil {
 		return err
 	}
-	if *keyPath == "" || opts.OfferPath == "" || !grant.ValidFingerprint(opts.Peer) {
-		return errors.New("provide -key, -offer and the full -peer fingerprint")
+	if opts.OfferPath == "" || (opts.Peer != "" && (*keyPath == "" || !grant.ValidFingerprint(opts.Peer))) {
+		return errors.New("provide -offer; for optional pinning provide -key and the full -peer fingerprint")
 	}
-	key, err := grant.LoadIdentity(*keyPath)
+	path, err := console.IdentityPath("", *keyPath)
 	if err != nil {
 		return err
 	}
-	opts.Key = key
-	lease, err := grant.LeaseIdentity(*keyPath)
+	if opts.Peer != "" {
+		opts.Key, err = grant.LoadIdentity(path)
+		if err != nil {
+			return err
+		}
+	} else if *keyPath == "" {
+		if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return err
+		}
+	}
+	lease, err := grant.LeaseIdentity(path)
 	if err != nil {
 		return err
 	}
 	defer lease.Close()
 	if command == "host" {
-		opts.Approval = approval
+		opts.Approval = func(ctx context.Context, _ grant.PairingCode) (string, error) { return approval(ctx) }
 		return session.Host(ctx, opts)
 	}
 	if answer == "" {
 		return errors.New("missing -answer")
+	}
+	if codeFile == "" {
+		return errors.New("missing -code-file for this invitation")
+	}
+	opts.PairingCode, err = grant.ReadPairingCode(codeFile)
+	if err != nil {
+		return err
 	}
 	return session.Connect(ctx, opts.Options, answer, stdio{os.Stdin, os.Stdout})
 }

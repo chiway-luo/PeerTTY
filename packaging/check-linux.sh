@@ -49,9 +49,13 @@ install_and_start() {
 
 install_and_start "$first"
 old_version=$version
+key="$XDG_CONFIG_HOME/PeerTTY/device.key"
+if [ ! -f "$key" ]; then peertty keygen -out "$key" >/dev/null; fi
 sha256sum "$XDG_CONFIG_HOME/PeerTTY/device.key" > "$work/identity.sha256"
 install_and_start "$second"
 [ "$version" != "$old_version" ]
+printf '0\n' | peertty menu -state-dir "$work/new-profile" -stun none > "$work/new-menu"
+[ ! -e "$work/new-profile/device.key" ]
 sha256sum --status -c "$work/identity.sha256"
 if [ "$format" = deb ]; then
     dpkg --root="$root" --remove peertty

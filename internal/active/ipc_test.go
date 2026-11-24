@@ -2,10 +2,12 @@ package active
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -195,7 +197,10 @@ func TestWorkerAcceptsOneApprovalForTheCurrentGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := worker{offer: offer, state: State{ID: "current", Role: "host", Phase: "waiting"}, approval: make(chan grant.Ticket, 1)}
+	if err := fixtureCode.Seal(&answer); err != nil {
+		t.Fatal(err)
+	}
+	w := worker{offer: offer, state: State{PairingCode: fixtureCode, ID: "current", Role: "host", Phase: "waiting"}, approval: make(chan grant.Ticket, 1)}
 	revoked := false
 	callWorker := func(req request) reply {
 		t.Helper()
@@ -339,5 +344,61 @@ func TestFailedReadinessRemovesRendezvousAndReleasesLease(t *testing.T) {
 	}
 	if err := lease.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStatusDistinguishesUnreadableDiscoveryAndMissingIdentity(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "fixture.key")
+	if err := os.Mkdir(key+".active", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Status(t.Context(), key); err == nil || errors.Is(err, ErrInactive) || s != (State{}) {
+		t.Fatalf("directory in place of status returned %+v / %v", s, err)
+	}
+	if err := os.Remove(key + ".active"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key+".active", []byte("1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Status(t.Context(), key); !errors.Is(err, ErrInactive) || s != (State{}) {
+		t.Fatalf("missing local identity returned %+v / %v", s, err)
+	}
+}
+
+func TestStatusReportsCanceledDialWithoutAnActiveGrant(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "fixture.key")
+	if _, err := grant.NewIdentity(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key+".active", []byte("1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if s, err := Status(ctx, key); !errors.Is(err, ErrInactive) || s != (State{}) {
+		t.Fatalf("canceled status returned %+v / %v", s, err)
+	}
+}
+
+func TestCachedLocalTLSBoundsEntriesAndRetainsMatchingIdentity(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 33; i++ {
+		key := filepath.Join(dir, fmt.Sprintf("fixture-%d.key", i))
+		disk := writeTestIPCKey(t, key)
+		c, err := cachedLocalTLS(key)
+		if err != nil {
+			t.Fatalf("load fixture %d: %v", i, err)
+		}
+		private, ok := c.Certificates[0].PrivateKey.(ed25519.PrivateKey)
+		if !ok || !bytes.Equal(private, disk) {
+			t.Fatalf("configuration for fixture %d used a different identity", i)
+		}
+		tlsCacheMu.Lock()
+		size := len(tlsCache)
+		tlsCacheMu.Unlock()
+		if size > 32 {
+			t.Fatalf("identity cache retained %d entries", size)
+		}
 	}
 }

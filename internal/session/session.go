@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pion/datachannel"
+
 	"peertty/internal/bridge"
 	"peertty/internal/grant"
 	"peertty/internal/localssh"
@@ -20,10 +22,45 @@ type Config struct {
 	// Menu hosts bind to the one reply chosen locally. File-based hosts require a pinned Peer.
 	PairOnApproval bool
 	SSHUser        string
+	PairingCode    grant.PairingCode // Received independently by the controller.
+}
+
+// sessionPeer is the transport surface used by the one-shot CLI session.
+type sessionPeer interface {
+	Context() context.Context
+	Close() error
+	Offer(context.Context) (string, error)
+	Answer(context.Context, string) (string, error)
+	Accept(string) error
+	Channel(context.Context) (datachannel.ReadWriteCloserDeadliner, string, error)
+}
+
+type localEndpoint interface {
+	bridge.Endpoint
+	Temporary() bool
+	Release() error
+}
+
+type sessionIO struct {
+	peer func(context.Context, string) (sessionPeer, error)
+	open func(context.Context, int) (localEndpoint, error)
+	run  func(context.Context, bridge.Channel, bridge.Endpoint) error
+}
+
+func nativeSessionIO() sessionIO {
+	return sessionIO{
+		peer: func(ctx context.Context, spec string) (sessionPeer, error) { return transport.New(ctx, spec) },
+		open: func(ctx context.Context, port int) (localEndpoint, error) { return localssh.Open(ctx, port) },
+		run:  bridge.Run,
+	}
 }
 
 // RunHost publishes an offer and waits for an explicitly approved, matching answer.
-func RunHost(parent context.Context, cfg Config, ttl time.Duration, port int, exchange func(context.Context, grant.Ticket) (grant.Ticket, error), connected func(route string, temporarySSH bool)) error {
+func RunHost(parent context.Context, cfg Config, ttl time.Duration, port int, exchange func(context.Context, grant.Ticket, grant.PairingCode) (grant.Ticket, error), connected func(route string, temporarySSH bool)) error {
+	return nativeSessionIO().host(parent, cfg, ttl, port, exchange, connected)
+}
+
+func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration, port int, exchange func(context.Context, grant.Ticket, grant.PairingCode) (grant.Ticket, error), connected func(string, bool)) error {
 	if ttl <= 0 || ttl > grant.MaxTTL {
 		return fmt.Errorf("TTL must be positive and at most %s", grant.MaxTTL)
 	}
@@ -39,7 +76,7 @@ func RunHost(parent context.Context, cfg Config, ttl time.Duration, port int, ex
 	ctx, cancel := context.WithTimeout(parent, ttl)
 	defer cancel()
 	expiry, _ := ctx.Deadline()
-	peer, err := transport.New(ctx, cfg.STUN)
+	peer, err := deps.peer(ctx, cfg.STUN)
 	if err != nil {
 		return err
 	}
@@ -50,18 +87,32 @@ func RunHost(parent context.Context, cfg Config, ttl time.Duration, port int, ex
 	}
 	var offer grant.Ticket
 	if cfg.PairOnApproval {
-		offer, err = grant.NewPairingOffer(cfg.Key, sdp, cfg.SSHUser, expiry)
+		_, key, keyErr := ed25519.GenerateKey(nil)
+		if keyErr != nil {
+			return keyErr
+		}
+		offer, err = grant.NewPairingOffer(key, sdp, cfg.SSHUser, expiry)
 	} else {
+		if len(cfg.Key) != ed25519.PrivateKeySize {
+			return errors.New("缺少指定的设备密钥")
+		}
 		offer, err = grant.NewOffer(cfg.Key, cfg.Peer, sdp, expiry)
 	}
 	if err != nil {
 		return err
 	}
-	answer, err := exchange(ctx, offer)
+	code, err := grant.NewPairingCode()
 	if err != nil {
 		return err
 	}
-	if err := answer.VerifyAnswer(offer, time.Now()); err != nil {
+	if err = code.Seal(&offer); err != nil {
+		return err
+	}
+	answer, err := exchange(ctx, offer, code)
+	if err != nil {
+		return err
+	}
+	if err := code.VerifyAnswer(offer, answer, time.Now()); err != nil {
 		return err
 	}
 	if err := peer.Accept(answer.Claims.SDP); err != nil {
@@ -77,24 +128,49 @@ func RunHost(parent context.Context, cfg Config, ttl time.Duration, port int, ex
 		}
 		return fmt.Errorf("establish direct path after approval: %w", err)
 	}
-	conn, err := localssh.Open(peer.Context(), port)
+	conn, err := deps.open(peer.Context(), port)
 	if err != nil {
 		return err
 	}
 	connected(route, conn.Temporary())
-	err = bridge.Run(peer.Context(), wire, conn)
+	err = deps.run(peer.Context(), wire, conn)
 	return errors.Join(err, conn.Release())
 }
 
 // RunControl owns the endpoint once the direct connection is established.
 func RunControl(parent context.Context, cfg Config, offer grant.Ticket, endpoint bridge.Endpoint, publish func(grant.Ticket) error, connected func(string)) error {
-	self := grant.Fingerprint(cfg.Key.Public().(ed25519.PublicKey))
-	if err := offer.VerifyOffer(cfg.Peer, self, time.Now()); err != nil {
+	return nativeSessionIO().control(parent, cfg, offer, endpoint, publish, connected)
+}
+
+func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ticket, endpoint bridge.Endpoint, publish func(grant.Ticket) error, connected func(string)) error {
+	key := cfg.Key
+	if offer.Pinned() {
+		if len(key) != ed25519.PrivateKeySize || cfg.Peer == "" {
+			return errors.New("定向邀请需要双方指定设备指纹")
+		}
+	} else {
+		var err error
+		_, key, err = ed25519.GenerateKey(nil)
+		if err != nil {
+			return err
+		}
+	}
+	peerID := cfg.Peer
+	if peerID == "" {
+		peerID = offer.Sender()
+	}
+	if err := offer.VerifyOffer(peerID, grant.Fingerprint(key.Public().(ed25519.PublicKey)), time.Now()); err != nil {
 		return err
+	}
+	if err := cfg.PairingCode.VerifyProof(offer); err != nil {
+		return err
+	}
+	if offer.Reusable() {
+		return errors.New("请在菜单打开多终端授权邀请")
 	}
 	ctx, cancel := context.WithDeadline(parent, offer.Deadline())
 	defer cancel()
-	peer, err := transport.New(ctx, cfg.STUN)
+	peer, err := deps.peer(ctx, cfg.STUN)
 	if err != nil {
 		return err
 	}
@@ -103,8 +179,11 @@ func RunControl(parent context.Context, cfg Config, offer grant.Ticket, endpoint
 	if err != nil {
 		return err
 	}
-	answer, err := grant.NewAnswer(cfg.Key, offer, sdp)
+	answer, err := grant.NewAnswer(key, offer, sdp)
 	if err != nil {
+		return err
+	}
+	if err = cfg.PairingCode.Seal(&answer); err != nil {
 		return err
 	}
 	if err := publish(answer); err != nil {
@@ -115,5 +194,5 @@ func RunControl(parent context.Context, cfg Config, offer grant.Ticket, endpoint
 		return fmt.Errorf("await host approval and direct path: %w", err)
 	}
 	connected(route)
-	return bridge.Run(peer.Context(), wire, endpoint)
+	return deps.run(peer.Context(), wire, endpoint)
 }

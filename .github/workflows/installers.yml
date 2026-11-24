@@ -36,9 +36,11 @@ jobs:
           sudo installer -pkg "dist/installers/$FIRST/PeerTTY-macOS.pkg" -target /
           test "$(peertty --version)" = "PeerTTY $FIRST"
           printf '0\n' | peertty menu -state-dir "$state" -stun none
-          fingerprint=$(peertty fingerprint -key "$state/device.key")
+          test ! -e "$state/device.key"
+          fingerprint=$(peertty keygen -out "$state/device.key")
           sudo installer -pkg "$RUNNER_TEMP/next/installers/$SECOND/PeerTTY-macOS.pkg" -target /
           test "$(peertty --version)" = "PeerTTY $SECOND"
+          printf '0\n' | peertty menu -state-dir "$state" -stun none
           test "$(peertty fingerprint -key "$state/device.key")" = "$fingerprint"
           sudo rm /usr/local/bin/peertty /Library/PeerTTY/peertty
           sudo rmdir /Library/PeerTTY

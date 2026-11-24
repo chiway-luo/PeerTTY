@@ -206,7 +206,7 @@ func TestPairingReplyBindsBothKeysAndExactInvitation(t *testing.T) {
 	selfReply, _ := NewAnswer(host, offer, "answer")
 	modified := answer
 	modified.Claims.Issuer = otherPub
-	wrongHost, _ := sign(operator, Claims{Version: pairingVersion, Kind: "answer", Session: offer.Claims.Session,
+	wrongHost, _ := sign(operator, Claims{Version: currentVersion, OneShot: true, Kind: "answer", Session: offer.Claims.Session,
 		ExpiresMS: offer.Claims.ExpiresMS, Recipient: Fingerprint(otherPub), OfferDigest: offer.digest(), SDP: "answer"})
 	badUser := offer
 	badUser.Claims.SSHUser = "different"

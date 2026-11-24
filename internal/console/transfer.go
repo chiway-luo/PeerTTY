@@ -54,7 +54,20 @@ func transferSSHOptions(exe string, s active.State) []string {
 }
 
 func resolveTransferGrant(ctx context.Context, key string, diag io.Writer) (active.State, error) {
-	s, err := active.Status(ctx, key)
+	status := func(ctx context.Context) (active.State, error) { return active.Status(ctx, key) }
+	return resolveTransferGrantWith(ctx, diag, status,
+		func(ctx context.Context, s active.State, diag io.Writer) (active.State, error) {
+			tick := time.NewTicker(300 * time.Millisecond)
+			defer tick.Stop()
+			return waitReconnect(ctx, s, diag, tick.C, status)
+		})
+}
+
+func resolveTransferGrantWith(ctx context.Context, diag io.Writer,
+	status func(context.Context) (active.State, error),
+	wait func(context.Context, active.State, io.Writer) (active.State, error),
+) (active.State, error) {
+	s, err := status(ctx)
 	if err != nil {
 		return active.State{}, err
 	}
@@ -62,11 +75,7 @@ func resolveTransferGrant(ctx context.Context, key string, diag io.Writer) (acti
 		if terminalFile(diag) {
 			fmt.Fprintln(diag, reconnectRevokeHint)
 		}
-		tick := time.NewTicker(300 * time.Millisecond)
-		defer tick.Stop()
-		s, err = waitReconnect(ctx, s, diag, tick.C, func(ctx context.Context) (active.State, error) {
-			return active.Status(ctx, key)
-		})
+		s, err = wait(ctx, s, diag)
 		if err != nil {
 			return active.State{}, err
 		}

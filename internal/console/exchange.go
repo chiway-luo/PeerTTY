@@ -123,34 +123,10 @@ func showDeviceName(out io.Writer, label, name string) {
 	}
 }
 
-// showPeerIdentity prints the device name together with its cryptographic short
-// fingerprint and local TOFU trust status so users can detect impersonation or
-// distinguish identically named machines without a separate exchange step.
-func showPeerIdentity(out io.Writer, label, keyPath string, issuer ed25519.PublicKey, deviceName string) {
-	showDeviceName(out, label, deviceName)
-	if len(issuer) != ed25519.PublicKeySize {
-		return
-	}
-	fp := grant.Fingerprint(issuer)
-	if short := grant.ShortFingerprint(fp); short != "" {
-		fmt.Fprintf(out, "设备指纹  %s\n", short)
-	}
-	check := grant.LookupPeer(keyPath, fp, deviceName)
-	switch check.Trust {
-	case grant.PeerKnown:
-		if check.PreviousName != "" && validDeviceName(check.PreviousName) && !strings.EqualFold(check.PreviousName, deviceName) {
-			fmt.Fprintf(out, "信任记录  已知设备（曾用名 %s，上次连接 %s）\n", check.PreviousName, check.LastSeen.Local().Format("01-02 15:04"))
-		} else {
-			fmt.Fprintf(out, "信任记录  已知设备（上次连接 %s）\n", check.LastSeen.Local().Format("01-02 15:04"))
-		}
-	case grant.PeerKeyMismatch:
-		fmt.Fprintf(out, "! 警告    同名设备曾使用不同指纹 %s，请核对上方设备指纹后再确认。\n", check.ConflictID)
-	case grant.PeerHistoryUnavailable:
-		fmt.Fprintln(out, "! 设备信任记录无法读取，请单独核对指纹。")
-	case grant.PeerNew:
-		if keyPath != "" {
-			fmt.Fprintln(out, "信任记录  首次连接的设备")
-		}
+func showSessionIdentity(out io.Writer, label string, issuer ed25519.PublicKey, name string) {
+	showDeviceName(out, label, name)
+	if len(issuer) == ed25519.PublicKeySize {
+		fmt.Fprintf(out, "本次会话指纹  %s\n", grant.ShortFingerprint(grant.Fingerprint(issuer)))
 	}
 }
 

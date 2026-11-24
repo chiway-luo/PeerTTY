@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 )
 
 var ErrInactive = errors.New("当前没有有效的 PeerTTY 授权")
@@ -31,13 +32,14 @@ type State struct {
 	Deadline                                             time.Time
 	Terminals                                            int
 	RequireScoped                                        bool
+	PairingCode                                          grant.PairingCode // Host only, available to its menu over loopback mTLS.
 	// Local OpenSSH options for the authorized controller, sent only over local mTLS.
 	Alias, Identity, KnownHosts, SSHConfig string
 }
 
 // CheckAnswer also enforces the login mode that actually passed host preflight.
 func (s State) CheckAnswer(offer, answer grant.Ticket, now time.Time) error {
-	if err := answer.VerifyAnswer(offer, now); err != nil {
+	if err := s.PairingCode.VerifyAnswer(offer, answer, now); err != nil {
 		return err
 	}
 	if s.RequireScoped && len(answer.Claims.SSHLoginKey) == 0 {
@@ -55,7 +57,7 @@ type reply struct {
 	Error string `json:",omitempty"`
 }
 
-// The OS-protected identity authenticates both ends of the loopback socket.
+// A per-worker credential authenticates both ends of the loopback socket.
 // The rendezvous file contains only a port. Reuse of a stale port confers no access.
 func localTLS(key ed25519.PrivateKey) (*tls.Config, error) {
 	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"localhost"},
@@ -89,12 +91,14 @@ var (
 // cachedLocalTLS avoids regenerating a self-signed Ed25519 X.509 certificate
 // on every status poll while immediately invalidating if the key file changes.
 func cachedLocalTLS(keyPath string) (*tls.Config, error) {
-	key, err := grant.LoadIdentity(keyPath)
+	data, err := identitystate.Read(keyPath, ed25519.SeedSize)
 	if err != nil {
 		return nil, err
 	}
-	// The cache tag and certificate must describe the very same read, even
-	// if another process atomically rotates the device key during this call.
+	if len(data) != ed25519.SeedSize {
+		return nil, errors.New("本机授权凭证无效")
+	}
+	key := ed25519.NewKeyFromSeed(data)
 	digest := sha256.Sum256(key)
 	tlsCacheMu.Lock()
 	if entry, ok := tlsCache[keyPath]; ok && entry.digest == digest {
@@ -163,10 +167,6 @@ func call(ctx context.Context, keyPath string, req request) (*tls.Conn, State, e
 	if err != nil || port == 0 {
 		return nil, st, errors.New("不能读取本机授权状态")
 	}
-	cfg, err := cachedLocalTLS(keyPath)
-	if err != nil {
-		return nil, st, err
-	}
 	probe, stop := context.WithTimeout(ctx, 4*time.Second)
 	defer stop()
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
@@ -174,12 +174,17 @@ func call(ctx context.Context, keyPath string, req request) (*tls.Conn, State, e
 	if err != nil {
 		return nil, st, fmt.Errorf("%w · 后台进程已离线", ErrInactive)
 	}
+	cfg, err := cachedLocalTLS(identitystate.RuntimePath(keyPath, "control.key"))
+	if err != nil {
+		raw.Close()
+		return nil, st, discoveryError(keyPath, err)
+	}
 	c := tls.Client(raw, cfg)
 	until, _ := probe.Deadline()
 	_ = c.SetDeadline(until)
 	if err = c.HandshakeContext(probe); err != nil {
 		c.Close()
-		return nil, st, fmt.Errorf("本机授权进程身份校验失败: %w", err)
+		return nil, st, discoveryError(keyPath, fmt.Errorf("本机授权进程身份校验失败: %w", err))
 	}
 	var res reply
 	if req.Op == "link" {
@@ -197,6 +202,17 @@ func call(ctx context.Context, keyPath string, req request) (*tls.Conn, State, e
 	}
 	_ = c.SetDeadline(time.Time{})
 	return c, res.State, nil
+}
+
+// A copied or crashed worker may leave a port that now belongs to a different
+// process. Only an unlocked profile may replace stale discovery on its next run.
+func discoveryError(path string, cause error) error {
+	lease, err := grant.LeaseIdentity(path)
+	if err != nil {
+		return cause
+	}
+	_ = lease.Close()
+	return ErrInactive
 }
 
 func action(ctx context.Context, path string, r request) (State, error) {
@@ -227,13 +243,19 @@ func WaitEnded(ctx context.Context, path, id string) error {
 	defer stop()
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
+	return waitEnded(until, path, id, tick.C, func(ctx context.Context) (State, error) {
+		return Status(ctx, path)
+	})
+}
+
+func waitEnded(ctx context.Context, path, id string, ticks <-chan time.Time, status func(context.Context) (State, error)) error {
 	for {
 		select {
-		case <-until.Done():
+		case <-ctx.Done():
 			return errors.New("后台仍在回收本次连接")
-		case <-tick.C:
+		case <-ticks:
 		}
-		s, err := Status(until, path)
+		s, err := status(ctx)
 		if err == nil && s.ID != id {
 			return nil
 		}

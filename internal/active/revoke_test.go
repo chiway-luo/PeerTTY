@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 )
 
 // Exercise the local client and worker against a disconnected grant, without
@@ -21,10 +22,7 @@ func TestRevokeReconnectingWorkerThroughLocalIPC(t *testing.T) {
 	if _, err := grant.NewIdentity(keyPath); err != nil {
 		t.Fatal(err)
 	}
-	key, err := grant.LoadIdentity(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := writeTestIPCKey(t, identitystate.RuntimePath(keyPath, "control.key"))
 	lease, err := grant.LeaseIdentity(keyPath)
 	if err != nil {
 		t.Fatal(err)

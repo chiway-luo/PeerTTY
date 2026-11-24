@@ -3,11 +3,13 @@ package active
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"peertty/internal/identitystate"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -91,9 +93,7 @@ func TestProlongedOutageUpdatesAndClearsNotice(t *testing.T) {
 func TestCachedLocalTLSAndLastError(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "device.key")
-	if _, err := grant.NewIdentity(keyPath); err != nil {
-		t.Fatal(err)
-	}
+	writeTestIPCKey(t, keyPath)
 	c1, err := cachedLocalTLS(keyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -106,17 +106,7 @@ func TestCachedLocalTLSAndLastError(t *testing.T) {
 		t.Fatal("expected cached certificate reuse for unchanged key")
 	}
 	// Replace key on disk and confirm cache invalidates immediately.
-	other := filepath.Join(dir, "other.key")
-	if _, err := grant.NewIdentity(other); err != nil {
-		t.Fatal(err)
-	}
-	rawOther, err := os.ReadFile(other)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath, rawOther, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeTestIPCKey(t, keyPath)
 	c3, err := cachedLocalTLS(keyPath)
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +307,13 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 		return State{}
 	}
 	host, operator := newKey(), newKey()
+	imageKey, err := os.ReadFile(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(operator, imageKey, 0600); err != nil {
+		t.Fatal(err)
+	}
 	earliestHostDeadline := time.Now().Add(ttl)
 	start(Options{Role: "host", Key: host, Port: listener.Addr().(*net.TCPAddr).Port, TTL: ttl})
 	a := wait(host, "waiting")
@@ -324,7 +321,7 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start(Options{Role: "control", Key: operator, Offer: offer, User: "fixture"})
+	start(Options{Role: "control", Key: operator, Offer: offer, PairingCode: a.PairingCode, User: "fixture"})
 	b := wait(operator, "waiting")
 	hostFP := grant.Fingerprint(offer.Claims.Issuer)
 	if got := grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName); got.Trust != grant.PeerNew {
@@ -336,6 +333,9 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	}
 	// A different device identity cannot even read this worker's status.
 	stranger := newKey()
+	if err := os.WriteFile(stranger, imageKey, 0600); err != nil {
+		t.Fatal(err)
+	}
 	port, err := os.ReadFile(operator + ".active")
 	if err != nil {
 		t.Fatal(err)
@@ -350,14 +350,18 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if offer.Claims.DeviceName == "" || offer.Claims.DeviceName != answer.Claims.DeviceName ||
+		bytes.Equal(offer.Claims.Issuer, answer.Claims.Issuer) {
+		t.Fatal("expected the same host name and cloned profile with two distinct session signers")
+	}
 	if err = Approve(ctx, host, a.ID, answer); err != nil {
 		t.Fatal(err)
 	}
 	wait(host, "ready")
 	wait(operator, "ready")
-	if grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName).Trust != grant.PeerKnown ||
-		grant.LookupPeer(host, grant.Fingerprint(answer.Claims.Issuer), answer.Claims.DeviceName).Trust != grant.PeerKnown {
-		t.Fatal("approved connected peers were not recorded")
+	if grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName).Trust != grant.PeerNew ||
+		grant.LookupPeer(host, grant.Fingerprint(answer.Claims.Issuer), answer.Claims.DeviceName).Trust != grant.PeerNew {
+		t.Fatal("a one-time grant persisted peer trust")
 	}
 	var terminals []net.Conn
 	for i := 0; i < 2; i++ {
@@ -418,4 +422,18 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	if err := ctx.Err(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+const fixtureCode grant.PairingCode = "00000000-11111111-22222222-33333333"
+
+func writeTestIPCKey(t *testing.T, path string) ed25519.PrivateKey {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := identitystate.Replace(path, key.Seed()); err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

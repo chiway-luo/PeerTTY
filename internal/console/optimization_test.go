@@ -119,34 +119,18 @@ func TestSignedTicketTextNegotiatesWithLegacyHosts(t *testing.T) {
 	}
 }
 
-func TestShowPeerIdentityDisplaysFingerprintAndTOFUWarnings(t *testing.T) {
-	pubA, _, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, _, _ := ed25519.GenerateKey(rand.Reader)
-	keyPath := filepath.Join(t.TempDir(), "device.key")
-	fpA := grant.Fingerprint(pubA)
-
-	var out bytes.Buffer
-	showPeerIdentity(&out, "被控设备", keyPath, pubA, "Alice's Mac (Lab)")
-	text := out.String()
-	for _, want := range []string{"Alice's Mac (Lab)", grant.ShortFingerprint(fpA), "首次连接的设备"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("first-time output missing %q: %q", want, text)
+func TestSessionFingerprintsDistinguishIdenticallyNamedPeers(t *testing.T) {
+	for range 2 {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	if err := grant.RecordPeer(keyPath, fpA, "Alice's Mac (Lab)", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	out.Reset()
-	showPeerIdentity(&out, "被控设备", keyPath, pubA, "Alice's Mac (Lab)")
-	if !strings.Contains(out.String(), "已知设备") {
-		t.Fatalf("known device missing trust record: %q", out.String())
-	}
-
-	out.Reset()
-	showPeerIdentity(&out, "被控设备", keyPath, pubB, "Alice's Mac (Lab)")
-	if !strings.Contains(out.String(), "警告") || !strings.Contains(out.String(), grant.ShortFingerprint(fpA)) {
-		t.Fatalf("key mismatch warning missing: %q", out.String())
+		var out bytes.Buffer
+		showSessionIdentity(&out, "被控设备", pub, "Alice's Mac (Lab)")
+		want := "被控设备  Alice's Mac (Lab)\n本次会话指纹  " + grant.ShortFingerprint(grant.Fingerprint(pub)) + "\n"
+		if out.String() != want {
+			t.Fatalf("unexpected pairing display: %q", out.String())
+		}
 	}
 }
 

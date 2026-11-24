@@ -48,7 +48,11 @@ func shareTicketWith(ctx context.Context, out io.Writer, kind string, ticket gra
 }
 
 func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
-	switch runtime.GOOS {
+	return clipboardCommandFor(ctx, write, runtime.GOOS, os.Getenv, exec.LookPath)
+}
+
+func clipboardCommandFor(ctx context.Context, write bool, platform string, getenv func(string) string, lookPath func(string) (string, error)) (*exec.Cmd, error) {
+	switch platform {
 	case "darwin":
 		if write {
 			return exec.CommandContext(ctx, "/usr/bin/pbcopy"), nil
@@ -62,25 +66,25 @@ func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
 		}
 		return exec.CommandContext(ctx, exe, "-NoProfile", "-NonInteractive", "-STA", "-Command", script), nil
 	case "linux":
-		if os.Getenv("WAYLAND_DISPLAY") != "" {
+		if getenv("WAYLAND_DISPLAY") != "" {
 			name := "wl-paste"
 			args := []string{"--no-newline"}
 			if write {
 				name, args = "wl-copy", nil
 			}
-			if exe, err := exec.LookPath(name); err == nil {
+			if exe, err := lookPath(name); err == nil {
 				return exec.CommandContext(ctx, exe, args...), nil
 			}
 		}
-		if os.Getenv("DISPLAY") != "" {
-			if exe, err := exec.LookPath("xclip"); err == nil {
+		if getenv("DISPLAY") != "" {
+			if exe, err := lookPath("xclip"); err == nil {
 				mode := "-out"
 				if write {
 					mode = "-in"
 				}
 				return exec.CommandContext(ctx, exe, "-selection", "clipboard", mode), nil
 			}
-			if exe, err := exec.LookPath("xsel"); err == nil {
+			if exe, err := lookPath("xsel"); err == nil {
 				mode := "--output"
 				if write {
 					mode = "--input"
@@ -97,17 +101,31 @@ func clipboardCommand(ctx context.Context, write bool) (*exec.Cmd, error) {
 type clipboardLookup func(context.Context, bool) (*exec.Cmd, error)
 
 func copyTicket(parent context.Context, out io.Writer, ticket grant.Ticket) (string, error) {
+	return copyTicketUsing(parent, out, ticket, nativeWriteClipboard, clipboardCommand)
+}
+
+func copyTicketUsing(parent context.Context, out io.Writer, ticket grant.Ticket, native func(string) (bool, error), lookup clipboardLookup) (string, error) {
 	var b strings.Builder
 	if err := writeTicketText(&b, ticket); err != nil {
 		return "", err
 	}
-	if handled, err := nativeWriteClipboard(b.String()); handled && err == nil {
+	if handled, err := native(b.String()); handled && err == nil {
 		return "已复制到系统剪贴板。", nil
 	}
-	return copyTicketWith(parent, out, ticket, clipboardCommand)
+	return copyTicketWith(parent, out, ticket, lookup)
 }
 
 func copyTicketWith(parent context.Context, out io.Writer, ticket grant.Ticket, lookup clipboardLookup) (string, error) {
+	return copyTicketWithTerminal(parent, out, ticket, lookup, func() bool {
+		return terminalClipboardAvailable(runtime.GOOS, func() bool { return terminalFile(out) }, os.Getenv("TERM"))
+	})
+}
+
+func terminalClipboardAvailable(platform string, isTerminal func() bool, term string) bool {
+	return platform != "windows" && isTerminal() && term != "" && term != "dumb"
+}
+
+func copyTicketWithTerminal(parent context.Context, out io.Writer, ticket grant.Ticket, lookup clipboardLookup, hasTerminal func() bool) (string, error) {
 	var b strings.Builder
 	if err := writeTicketText(&b, ticket); err != nil {
 		return "", err
@@ -121,7 +139,7 @@ func copyTicketWith(parent context.Context, out io.Writer, ticket grant.Ticket, 
 			return "已复制到系统剪贴板。", nil
 		}
 	}
-	if runtime.GOOS != "windows" && terminalFile(out) && os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb" {
+	if hasTerminal() {
 		if _, err = fmt.Fprintf(out, "\x1b]52;c;%s\x07", base64.StdEncoding.EncodeToString([]byte(b.String()))); err == nil {
 			return "已向终端发送复制请求，是否写入取决于终端的剪贴板设置。", nil
 		}
@@ -131,10 +149,14 @@ func copyTicketWith(parent context.Context, out io.Writer, ticket grant.Ticket, 
 
 // Clipboard import only happens on request. Treat its contents as data.
 func ticketInput(ctx context.Context, s string) (string, error) {
+	return ticketInputUsing(ctx, s, nativeReadClipboard, clipboardCommand)
+}
+
+func ticketInputUsing(ctx context.Context, s string, native func() (string, bool, error), lookup clipboardLookup) (string, error) {
 	if !clipboardChoice(s) {
 		return s, nil
 	}
-	if text, handled, err := nativeReadClipboard(); handled {
+	if text, handled, err := native(); handled {
 		if err != nil {
 			if errors.Is(err, oversizePaste) {
 				return "", oversizePaste
@@ -147,7 +169,7 @@ func ticketInput(ctx context.Context, s string) (string, error) {
 		}
 		return value, err
 	}
-	return ticketInputWith(ctx, s, clipboardCommand)
+	return ticketInputWith(ctx, s, lookup)
 }
 
 func ticketInputWith(ctx context.Context, s string, lookup clipboardLookup) (string, error) {

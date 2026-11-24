@@ -121,7 +121,10 @@ func TestHostPanelCanReviewAndDiscardAReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	st := active.State{Role: "host", Phase: "waiting", ID: "fixture", Exchange: filepath.Join(dir, "invite"), Deadline: deadline}
+	if err := fixtureCode.Seal(&answer); err != nil {
+		t.Fatal(err)
+	}
+	st := active.State{PairingCode: fixtureCode, Role: "host", Phase: "waiting", ID: "fixture", Exchange: filepath.Join(dir, "invite"), Deadline: deadline}
 	if err := offer.WriteNew(st.Exchange); err != nil {
 		t.Fatal(err)
 	}

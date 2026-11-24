@@ -56,7 +56,7 @@ func TestFileExchangePreservesOfferOnRetry(t *testing.T) {
 		t.Fatalf("missing invitation: %v", err)
 	}
 	declined := errors.New("operator declined")
-	settings := HostOptions{Options: opts, SSHPort: 22, TTL: time.Minute, Approval: func(context.Context) (string, error) {
+	settings := HostOptions{Options: opts, SSHPort: 22, TTL: time.Minute, Approval: func(context.Context, grant.PairingCode) (string, error) {
 		return "", declined
 	}}
 	if err := Host(ctx, settings); !errors.Is(err, declined) || !strings.Contains(status.String(), opts.OfferPath) {

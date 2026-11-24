@@ -18,10 +18,22 @@ import (
 	"peertty/internal/transport"
 )
 
+type hostStartServices struct {
+	status   func(context.Context, string) (active.State, error)
+	ready    func(context.Context) (localssh.Check, error)
+	duration func(context.Context, localssh.Check) (time.Duration, error)
+	start    func(context.Context, active.Options) (active.State, error)
+	watch    func(context.Context, active.State) error
+}
+
 func (t *Console) host(ctx context.Context) error {
-	if current, err := active.Status(ctx, t.KeyPath); err == nil {
+	return t.hostWith(ctx, hostStartServices{active.Status, t.hostReady, t.askDuration, active.Start, t.watchHost})
+}
+
+func (t *Console) hostWith(ctx context.Context, services hostStartServices) error {
+	if current, err := services.status(ctx, t.KeyPath); err == nil {
 		if current.Role == "host" {
-			return t.watchHost(ctx, current)
+			return services.watch(ctx, current)
 		}
 		return grant.ErrInUse
 	} else if !errors.Is(err, active.ErrInactive) {
@@ -30,34 +42,44 @@ func (t *Console) host(ctx context.Context) error {
 	if !t.terminalUI() {
 		fmt.Fprintln(t.out, "允许被控制 · 输入 q 返回")
 	}
-	initial, err := t.hostReady(ctx)
+	initial, err := services.ready(ctx)
 	if err != nil {
 		return err
 	}
-	ttl, err := t.askDuration(ctx, initial)
+	ttl, err := services.duration(ctx, initial)
 	if err != nil {
 		return err
 	}
-	current, err := t.hostReady(ctx)
+	current, err := services.ready(ctx)
 	if err != nil {
 		return err
 	}
-	st, err := active.Start(ctx, active.Options{Role: "host", Key: t.KeyPath, Port: t.SSHPort, TTL: ttl, STUN: t.STUN, RequireScoped: current.ScopedOnly})
+	st, err := services.start(ctx, active.Options{Role: "host", Key: t.KeyPath, Port: t.SSHPort, TTL: ttl, STUN: t.STUN, RequireScoped: current.ScopedOnly})
 	if err != nil {
 		return err
 	}
-	return t.watchHost(ctx, st)
+	return services.watch(ctx, st)
 }
 
 const hostPrompt = "回执 / p 读取 / c 复制 / v 显示 / b 返回 / q 撤销 > "
 
+type hostPanelServices struct {
+	status  func(context.Context, string) (active.State, error)
+	revoke  func(context.Context, string, string) error
+	approve func(context.Context, string, string, grant.Ticket) error
+}
+
 func (t *Console) watchHost(ctx context.Context, st active.State) error {
-	t.section = "被控面板"
-	defer t.setActivity("")
 	spin := time.NewTicker(spinInterval)
 	defer spin.Stop()
 	poll := time.NewTicker(600 * time.Millisecond)
 	defer poll.Stop()
+	return t.hostPanel(ctx, st, spin.C, poll.C, hostPanelServices{active.Status, active.Revoke, active.Approve})
+}
+
+func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-chan time.Time, services hostPanelServices) error {
+	t.section = "被控面板"
+	defer t.setActivity("")
 	var offer grant.Ticket
 	var pending *grant.Ticket
 	var input <-chan line
@@ -116,25 +138,25 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 		if input == nil && st.Phase != "gathering" {
 			input = t.next()
 		}
-		pollInterval := poll.C
+		pollInterval := poll
 		if st.Phase == "gathering" {
 			pollInterval = nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-spin.C:
+		case <-spin:
 			t.advanceActivity()
 			if st.Phase != "gathering" {
 				continue
 			}
-			fresh, err := active.Status(ctx, t.KeyPath)
+			fresh, err := services.status(ctx, t.KeyPath)
 			if err != nil || fresh.ID != st.ID {
 				return t.handleHostEnded(ctx, st, err)
 			}
 			st = fresh
 		case <-pollInterval:
-			fresh, err := active.Status(ctx, t.KeyPath)
+			fresh, err := services.status(ctx, t.KeyPath)
 			if err != nil || fresh.ID != st.ID {
 				return t.handleHostEnded(ctx, st, err)
 			}
@@ -160,7 +182,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				}
 				return errBack
 			case "q", "/revoke":
-				if err := active.Revoke(ctx, t.KeyPath, st.ID); err != nil {
+				if err := services.revoke(ctx, t.KeyPath, st.ID); err != nil {
 					return err
 				}
 				t.notice("32", "✓", "本次授权已撤销。")
@@ -180,7 +202,7 @@ func (t *Console) watchHost(ctx context.Context, st active.State) error {
 				}
 				if pending != nil {
 					if strings.EqualFold(item.text, "y") {
-						if err := active.Approve(ctx, t.KeyPath, st.ID, *pending); err != nil {
+						if err := services.approve(ctx, t.KeyPath, st.ID, *pending); err != nil {
 							return err
 						}
 						pending = nil
@@ -234,6 +256,8 @@ func (t *Console) describeOffer(st active.State, offer grant.Ticket) {
 	t.line("邀请中的直连地址 ·", transport.CountCandidates(offer.Claims.SDP))
 	t.line("邀请文件 ", st.Exchange)
 	t.line("有效至   ", st.Deadline.Local().Format("01-02 15:04"))
+	t.line("一次性配对码  ", st.PairingCode)
+	t.line("通过电话或另一条已确认对方身份的渠道，将配对码单独交给控制方。")
 	if st.Note != "" {
 		t.line("本次使用系统 SSH 认证 ·", st.Note)
 	}
@@ -263,7 +287,8 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 		t.writeHostPrompt(false)
 		return
 	}
-	showPeerIdentity(t.pageOut(), "请求控制的设备", t.KeyPath, pending.Claims.Issuer, pending.Claims.DeviceName)
+	showSessionIdentity(t.pageOut(), "请求控制的设备", pending.Claims.Issuer, pending.Claims.DeviceName)
+	t.line("可与控制方回执页上的本次会话指纹核对。")
 	t.notice("32", "✓", "回执已核验。关闭菜单后，此设备仍可在授权期内打开多个终端。")
 	if len(pending.Claims.SSHLoginKey) > 0 {
 		fmt.Fprintf(t.out, "批准后可直接登录当前账号 %s。\n", offer.Claims.SSHUser)
@@ -304,12 +329,16 @@ func (t *Console) showListener(st localssh.Check) {
 }
 
 func (t *Console) askDuration(ctx context.Context, initial localssh.Check) (time.Duration, error) {
+	return t.askDurationWith(ctx, initial, watchListener)
+}
+
+func (t *Console) askDurationWith(ctx context.Context, initial localssh.Check, subscribe func(context.Context, int, localssh.Check) <-chan localssh.Check) (time.Duration, error) {
 	ttl := t.TTL
 	var updates <-chan localssh.Check
 	if t.fullScreen {
 		watch, cancel := context.WithCancel(ctx)
 		defer cancel()
-		updates = watchListener(watch, t.SSHPort, initial)
+		updates = subscribe(watch, t.SSHPort, initial)
 		t.clearPage()
 		fmt.Fprint(t.out, "\x1b[3;r\x1b[3;1H")
 		defer func() {
@@ -372,41 +401,46 @@ func watchListener(ctx context.Context, port int, initial localssh.Check) <-chan
 	go func() {
 		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
-		last := initial
-		lastProbe := time.Now()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-tick.C:
-				// Avoid opening an unauthenticated SSH connection on every tick.
-				// Recheck periodically even if a privileged or lingering socket blocks bind.
-				if vacant != nil && now.Sub(lastProbe) < 12*time.Second && !vacant() {
-					continue
-				}
-				lastProbe = now
-			}
-			state := localssh.ProbeListener(ctx, port)
-			if state.Closed {
-				vacant = nil
-			} else if vacant == nil {
-				vacant = localssh.VacancyProbe(port)
-			}
-			if state.Closed && last.Closed || !state.Closed && state.Message == last.Message {
-				continue
-			}
-			last = state
-			if state.Closed && port == 22 {
-				state.Message = "本机 22 端口已关闭，提交授权时长后将复查临时 SSH。"
-			}
-			select {
-			case updates <- state:
-			case <-ctx.Done():
-				return
-			}
-		}
+		watchListenerEvents(ctx, port, initial, vacant, localssh.VacancyProbe, localssh.ProbeListener, time.Now(), tick.C, updates)
 	}()
 	return updates
+}
+
+func watchListenerEvents(ctx context.Context, port int, initial localssh.Check, vacant func() bool,
+	makeVacancy func(int) func() bool, probe func(context.Context, int) localssh.Check,
+	lastProbe time.Time, ticks <-chan time.Time, updates chan<- localssh.Check) {
+	last := initial
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticks:
+			// Avoid opening an unauthenticated SSH connection on every tick.
+			// Recheck periodically even if a privileged or lingering socket blocks bind.
+			if vacant != nil && now.Sub(lastProbe) < 12*time.Second && !vacant() {
+				continue
+			}
+			lastProbe = now
+		}
+		state := probe(ctx, port)
+		if state.Closed {
+			vacant = nil
+		} else if vacant == nil {
+			vacant = makeVacancy(port)
+		}
+		if state.Closed && last.Closed || !state.Closed && state.Message == last.Message {
+			continue
+		}
+		last = state
+		if state.Closed && port == 22 {
+			state.Message = "本机 22 端口已关闭，提交授权时长后将复查临时 SSH。"
+		}
+		select {
+		case updates <- state:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func parseGrantDuration(v string) (time.Duration, bool) {

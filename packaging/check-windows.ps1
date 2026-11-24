@@ -43,10 +43,14 @@ try {
     Invoke-Installer /i $FirstMsi
     $installed = $FirstMsi
     Test-Installation $FirstVersion
+    if (-not (Test-Path $key)) { & $binary keygen -out $key | Out-Null }
     $identity = (Get-FileHash -LiteralPath $key).Hash
     Invoke-Installer /i $SecondMsi
     $installed = $SecondMsi
     Test-Installation $SecondVersion
+    $fresh = Join-Path $state 'new-profile'
+    '0' | & $binary menu -state-dir $fresh -stun none | Out-Null
+    if ($LASTEXITCODE -ne 0 -or (Test-Path (Join-Path $fresh 'device.key'))) { throw 'Idle menu generated a device key.' }
     if ((Get-FileHash -LiteralPath $key).Hash -ne $identity) { throw 'Upgrade changed the device key.' }
     Invoke-Installer /x $installed
     $installed = $null

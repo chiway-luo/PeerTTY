@@ -18,6 +18,7 @@ import (
 	"github.com/pion/datachannel"
 	"peertty/internal/bridge"
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 	"peertty/internal/localssh"
 	"peertty/internal/transport"
 )
@@ -29,6 +30,23 @@ type Options struct {
 	Offer                                      grant.Ticket
 	Scoped                                     bool
 	RequireScoped                              bool
+	PairingCode                                grant.PairingCode
+}
+
+// workerPeer is the direct transport owned by the grant worker.
+type workerPeer interface {
+	Context() context.Context
+	Connected() bool
+	CanRoam() bool
+	Migrated() bool
+	Close() error
+	Offer(context.Context) (string, error)
+	Answer(context.Context, string) (string, error)
+	Accept(string) error
+	OnLink(func(datachannel.ReadWriteCloserDeadliner))
+	OpenLink(context.Context) (datachannel.ReadWriteCloserDeadliner, error)
+	BindGrant([]byte) error
+	Channel(context.Context) (datachannel.ReadWriteCloserDeadliner, string, error)
 }
 
 type worker struct {
@@ -39,7 +57,7 @@ type worker struct {
 	state    State
 	offer    grant.Ticket
 	approval chan grant.Ticket
-	peer     *transport.Peer
+	peer     workerPeer
 	linkCtx  context.Context
 	endLinks context.CancelFunc
 	login    *localssh.Login
@@ -57,7 +75,7 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	if !filepath.IsAbs(opts.Key) {
 		return errors.New("需要本机设备身份的完整路径")
 	}
-	key, err := grant.LoadIdentity(opts.Key)
+	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return err
 	}
@@ -68,11 +86,18 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 		if opts.TTL <= 0 || opts.TTL > grant.MaxTTL || opts.Port < 1 || opts.Port > 65535 || (opts.RequireScoped && opts.Port != 22) {
 			return errors.New("授权时长或 SSH 端口无效")
 		}
+		opts.PairingCode, err = grant.NewPairingCode()
+		if err != nil {
+			return err
+		}
 	case "control":
 		if !opts.Offer.Reusable() {
-			return errors.New("旧邀请需使用前台 SSH 连接")
+			return errors.New("此邀请不支持当前后台授权，请双方升级后重新配对")
 		}
 		if err = opts.Offer.VerifyOffer(grant.Fingerprint(opts.Offer.Claims.Issuer), grant.Fingerprint(key.Public().(ed25519.PublicKey)), now); err != nil {
+			return err
+		}
+		if err = opts.PairingCode.VerifyProof(opts.Offer); err != nil {
 			return err
 		}
 		deadline = opts.Offer.Deadline()
@@ -93,7 +118,14 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	defer cancel()
 	w := &worker{Options: opts, key: key, dir: dir, approval: make(chan grant.Ticket, 1),
 		state: State{ID: filepath.Base(dir), Role: opts.Role, Deadline: deadline, Phase: "gathering", User: opts.User, Identity: opts.Identity, SSHConfig: opts.SSHConfig, RequireScoped: opts.RequireScoped}}
-	tlsCfg, err := localTLS(key)
+	if opts.Role == "host" {
+		w.state.PairingCode = opts.PairingCode
+	}
+	_, localKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+	tlsCfg, err := localTLS(localKey)
 	if err != nil {
 		return err
 	}
@@ -107,6 +139,11 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	defer stopListener()
 	// Publish atomically while holding the same identity lease as the foreground CLI.
 	discovery := opts.Key + ".active"
+	localPath := identitystate.RuntimePath(opts.Key, "control.key")
+	if err = identitystate.Replace(localPath, localKey.Seed()); err != nil {
+		return err
+	}
+	defer os.Remove(localPath)
 	tmp, err := os.CreateTemp(filepath.Dir(discovery), ".peertty-port-*")
 	if err != nil {
 		return err
@@ -200,9 +237,18 @@ func (w *worker) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return w.runWithPeer(ctx, p)
+}
+
+func (w *worker) runWithPeer(ctx context.Context, p workerPeer) error {
+	return w.runWithLoginPrep(ctx, p, localssh.PrepareLogin)
+}
+
+func (w *worker) runWithLoginPrep(ctx context.Context, p workerPeer, prepare func(context.Context) (*localssh.Login, error)) error {
 	defer p.Close()
+	var err error
 	w.resetLinks(p.Context())
-	var ticket, remoteTicket grant.Ticket
+	var ticket grant.Ticket
 	var loginKey ed25519.PublicKey
 	var answerSDP string
 	var receiptSignature []byte
@@ -217,7 +263,7 @@ func (w *worker) run(ctx context.Context) error {
 		}
 		var hostKey ed25519.PublicKey
 		if w.Port == 22 {
-			w.login, err = localssh.PrepareLogin(ctx)
+			w.login, err = prepare(ctx)
 			if err == nil {
 				name, hostKey = w.login.User, w.login.HostKey
 			} else if w.RequireScoped {
@@ -228,6 +274,9 @@ func (w *worker) run(ctx context.Context) error {
 		}
 		ticket, err = grant.NewLoginOffer(w.key, sdp, name, hostKey, w.state.Deadline)
 		if err != nil {
+			return err
+		}
+		if err = w.PairingCode.Seal(&ticket); err != nil {
 			return err
 		}
 		path := filepath.Join(w.dir, "session.offer")
@@ -246,7 +295,6 @@ func (w *worker) run(ctx context.Context) error {
 			return ctx.Err()
 		case answer = <-w.approval:
 		}
-		remoteTicket = answer
 		receiptSignature = answer.Signature
 		loginKey = answer.Claims.SSHLoginKey
 		answerSDP = answer.Claims.SDP
@@ -269,7 +317,6 @@ func (w *worker) run(ctx context.Context) error {
 		}
 	} else {
 		offer := w.Offer
-		remoteTicket = offer
 		sdp, err := p.Answer(ctx, offer.Claims.SDP)
 		if err != nil {
 			return err
@@ -292,6 +339,9 @@ func (w *worker) run(ctx context.Context) error {
 		}
 		answer, err := grant.NewLoginAnswer(w.key, offer, sdp, loginKey)
 		if err != nil {
+			return err
+		}
+		if err = w.PairingCode.Seal(&answer); err != nil {
 			return err
 		}
 		receiptSignature = answer.Signature
@@ -332,14 +382,9 @@ func (w *worker) run(ctx context.Context) error {
 		return fmt.Errorf("双方未建立直连 · %w", err)
 	}
 	defer control.Close()
-	trustErr := grant.RecordPeer(w.Key, grant.Fingerprint(remoteTicket.Claims.Issuer), remoteTicket.Claims.DeviceName, time.Now())
 	w.mu.Lock()
 	if w.state.Note == waitingNote {
 		w.state.Note = ""
-	}
-	if trustErr != nil {
-		w.state.Note = "无法保存设备信任记录 · " + trustErr.Error()
-		logWorkerEvent(w.state.ID, "无法保存设备信任记录")
 	}
 	w.peer = p
 	w.state.Phase = "ready"
@@ -350,23 +395,9 @@ func (w *worker) run(ctx context.Context) error {
 	// separate streams and can close without ending the approved connection.
 	remoteClosed := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 16*1024)
-		n, text, err := control.ReadDataChannel(buf)
-		if err == nil {
-			switch {
-			case text && string(buf[:n]) == "REVOKE":
-				logWorkerEvent(w.state.ID, "remote peer revoked grant")
-				_ = control.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				_, _ = control.WriteDataChannel([]byte("CLOSED"), true)
-			case text && string(buf[:n]) == "CLOSED" && ctx.Err() != nil:
-			default:
-				err = errors.New("对端返回了未知的授权状态")
-			}
-		}
-		if err != nil {
-			err = fmt.Errorf("授权状态通道已关闭 · %w", err)
-		}
-		remoteClosed <- err
+		remoteClosed <- readGrantClosure(ctx, control, func() {
+			logWorkerEvent(w.state.ID, "remote peer revoked grant")
+		})
 	}()
 	err = waitForGrantEndWithNotice(ctx, p.Context(), p.Connected, remoteClosed, func() {
 		logWorkerEvent(w.state.ID, "route lost for 15s; closing stalled SSH streams")
@@ -393,6 +424,33 @@ func (w *worker) run(ctx context.Context) error {
 	return ctx.Err()
 }
 
+type grantControlStream interface {
+	ReadDataChannel([]byte) (int, bool, error)
+	WriteDataChannel([]byte, bool) (int, error)
+	SetWriteDeadline(time.Time) error
+}
+
+// readGrantClosure handles the one final message on the grant control stream.
+func readGrantClosure(ctx context.Context, control grantControlStream, onRevoke func()) error {
+	buf := make([]byte, 16*1024)
+	n, text, err := control.ReadDataChannel(buf)
+	if err == nil {
+		switch {
+		case text && string(buf[:n]) == "REVOKE":
+			onRevoke()
+			_ = control.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_, _ = control.WriteDataChannel([]byte("CLOSED"), true)
+		case text && string(buf[:n]) == "CLOSED" && ctx.Err() != nil:
+		default:
+			err = errors.New("对端返回了未知的授权状态")
+		}
+	}
+	if err != nil {
+		err = fmt.Errorf("授权状态通道已关闭 · %w", err)
+	}
+	return err
+}
+
 const (
 	routeRecoveryWindow   = 15 * time.Second
 	prolongedOutageWindow = 60 * time.Second
@@ -408,6 +466,10 @@ func waitForGrantEnd(ctx, peer context.Context, connected func() bool, remoteClo
 func waitForGrantEndWithNotice(ctx, peer context.Context, connected func() bool, remoteClosed <-chan error, closeStalled func(), onProlonged func(bool)) error {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	return waitForGrantEndEvents(ctx, peer, connected, remoteClosed, tick.C, closeStalled, onProlonged)
+}
+
+func waitForGrantEndEvents(ctx, peer context.Context, connected func() bool, remoteClosed <-chan error, ticks <-chan time.Time, closeStalled func(), onProlonged func(bool)) error {
 	var lostAt time.Time
 	var stalled, warned bool
 	for {
@@ -425,7 +487,7 @@ func waitForGrantEndWithNotice(ctx, peer context.Context, connected func() bool,
 			}
 		case err := <-remoteClosed:
 			return err
-		case now := <-tick.C:
+		case now := <-ticks:
 			if connected() {
 				if warned && onProlonged != nil {
 					onProlonged(false)
@@ -492,14 +554,11 @@ func (w *worker) serveSSH(ctx context.Context, stream datachannel.ReadWriteClose
 	}
 }
 
-func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelFunc) {
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
-	var req request
-	if err := receive(c, &req); err != nil {
-		return
-	}
+// acceptRequest owns the grant state transition and captures the link inputs
+// under the same lock. I/O remains outside the lock in handle.
+func (w *worker) acceptRequest(ctx context.Context, req request, now time.Time) (State, workerPeer, context.Context, error) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	s := w.state
 	p := w.peer
 	link := w.linkCtx
@@ -514,9 +573,10 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		case "approve":
 			if s.Role != "host" || s.Phase != "waiting" || req.Answer == nil {
 				err = errors.New("本次授权无法再次批准")
-			} else if err = s.CheckAnswer(w.offer, *req.Answer, time.Now()); err == nil {
+			} else if err = s.CheckAnswer(w.offer, *req.Answer, now); err == nil {
 				w.state.Phase = "connecting"
 				w.state.Device = req.Answer.Claims.DeviceName
+				w.state.PairingCode = ""
 				w.approval <- *req.Answer
 			}
 		case "link":
@@ -527,7 +587,17 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 			err = errors.New("未知的本机操作")
 		}
 	}
-	w.mu.Unlock()
+	return s, p, link, err
+}
+
+func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelFunc) {
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	var req request
+	if err := receive(c, &req); err != nil {
+		return
+	}
+	s, p, link, err := w.acceptRequest(ctx, req, time.Now())
 	if err != nil {
 		_ = send(c, reply{Error: err.Error()})
 		return

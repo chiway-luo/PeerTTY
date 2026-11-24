@@ -28,6 +28,7 @@ func (t *Console) drawReceipt(ctx context.Context, st active.State, answer grant
 		t.line("回执文件 ", st.Exchange)
 	}
 	t.line("有效至   ", st.Deadline.Local().Format("01-02 15:04"))
+	showSessionIdentity(t.pageOut(), "本机", answer.Claims.Issuer, answer.Claims.DeviceName)
 	t.line("将回执发给被控方。")
 	return nil
 }
@@ -87,11 +88,20 @@ func (t *Console) waitControl(ctx context.Context, st active.State, text bool) e
 	return t.controlPanel(ctx, st, text, false)
 }
 
+type receiptPanelServices struct {
+	status func(context.Context, string) (active.State, error)
+	link   func(context.Context, active.State) error
+}
+
 func (t *Console) controlPanel(ctx context.Context, st active.State, text, review bool) error {
-	t.section = "控制端回执"
-	defer t.setActivity("")
 	tick := time.NewTicker(spinInterval)
 	defer tick.Stop()
+	return t.receiptPanel(ctx, st, text, review, tick.C, receiptPanelServices{active.Status, t.linkSSH})
+}
+
+func (t *Console) receiptPanel(ctx context.Context, st active.State, text, review bool, tick <-chan time.Time, services receiptPanelServices) error {
+	t.section = "控制端回执"
+	defer t.setActivity("")
 	var keys receiptKeys
 	var answer *grant.Ticket
 	var lastPhase string
@@ -103,7 +113,7 @@ func (t *Console) controlPanel(ctx context.Context, st active.State, text, revie
 			t.setActivity("")
 			t.clearPage()
 			t.notice("32", "●", "控制会话已连接 · "+st.Route)
-			if err := t.linkSSH(ctx, st); err != nil {
+			if err := services.link(ctx, st); err != nil {
 				return fmt.Errorf("SSH 连接结束: %w", err)
 			}
 			if t.terminalUI() {
@@ -145,14 +155,14 @@ func (t *Console) controlPanel(ctx context.Context, st active.State, text, revie
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-tick.C:
+		case <-tick:
 		}
 		t.advanceActivity()
 		ticks++
 		fresh := st
 		if st.Phase == "gathering" || ticks%3 == 0 {
 			var err error
-			fresh, err = active.Status(ctx, t.KeyPath)
+			fresh, err = services.status(ctx, t.KeyPath)
 			if err != nil {
 				return err
 			}

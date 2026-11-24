@@ -65,12 +65,17 @@ type active struct {
 	stopClient   context.CancelFunc
 }
 
-func startPair(t *testing.T, ttl time.Duration) active {
+func startPair(t *testing.T, ttl time.Duration, pinned bool) active {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	hostPub, hostKey, _ := ed25519.GenerateKey(rand.Reader)
-	opPub, opKey, _ := ed25519.GenerateKey(rand.Reader)
+	hostOptions, controllerOptions := Options{}, Options{}
+	if pinned {
+		hostPub, hostKey, _ := ed25519.GenerateKey(rand.Reader)
+		opPub, opKey, _ := ed25519.GenerateKey(rand.Reader)
+		hostOptions.Key, hostOptions.Peer = hostKey, grant.Fingerprint(opPub)
+		controllerOptions.Key, controllerOptions.Peer = opKey, grant.Fingerprint(hostPub)
+	}
 	dir := t.TempDir()
 	offer, answer := filepath.Join(dir, "session.offer"), filepath.Join(dir, "session.answer")
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -78,14 +83,17 @@ func startPair(t *testing.T, ttl time.Duration) active {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Close() })
+	hostOptions.OfferPath, hostOptions.Status = offer, io.Discard
+	var code grant.PairingCode
 	offerReady, approve := make(chan struct{}), make(chan struct{})
 	written := &notifier{wrote: make(chan struct{})}
 	hostDone, clientDone := make(chan error, 1), make(chan error, 1)
 	go func() {
 		hostDone <- Host(ctx, HostOptions{
-			Options: Options{Key: hostKey, Peer: grant.Fingerprint(opPub), OfferPath: offer, Status: io.Discard},
+			Options: hostOptions,
 			TTL:     ttl, SSHPort: l.Addr().(*net.TCPAddr).Port,
-			Approval: func(ctx context.Context) (string, error) {
+			Approval: func(ctx context.Context, issued grant.PairingCode) (string, error) {
+				code = issued
 				close(offerReady)
 				select {
 				case <-approve:
@@ -101,7 +109,8 @@ func startPair(t *testing.T, ttl time.Duration) active {
 	clientCtx, stopClient := context.WithCancel(ctx)
 	t.Cleanup(stopClient)
 	go func() {
-		clientDone <- Connect(clientCtx, Options{Key: opKey, Peer: grant.Fingerprint(hostPub), OfferPath: offer, Status: written}, answer, endpoint)
+		controllerOptions.PairingCode, controllerOptions.OfferPath, controllerOptions.Status = code, offer, written
+		clientDone <- Connect(clientCtx, controllerOptions, answer, endpoint)
 	}()
 	await(t, written.wrote)
 	l.SetDeadline(time.Now().Add(25 * time.Millisecond))
@@ -123,7 +132,7 @@ func TestOperatorDisconnectReleasesSSH(t *testing.T) {
 	if testing.Short() {
 		t.Skip("connects both peers to exercise a complete session")
 	}
-	s := startPair(t, time.Minute)
+	s := startPair(t, time.Minute, true)
 	s.stopClient()
 	s.backend.SetReadDeadline(time.Now().Add(9 * time.Second))
 	if _, err := s.backend.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
@@ -137,7 +146,7 @@ func TestDirectSessionHalfClose(t *testing.T) {
 	if testing.Short() {
 		t.Skip("connects both peers to exercise a complete session")
 	}
-	s := startPair(t, 25*time.Second)
+	s := startPair(t, 25*time.Second, false)
 	payload := bytes.Repeat([]byte("SSH\x00\xff\r\n"), 90_000)
 	reply := append([]byte("received\n"), payload...)
 	server := make(chan error, 1)
@@ -179,7 +188,7 @@ func TestActiveGrantExpires(t *testing.T) {
 	if testing.Short() {
 		t.Skip("connects both peers to exercise a complete session")
 	}
-	s := startPair(t, 2*time.Second)
+	s := startPair(t, 2*time.Second, false)
 	s.backend.SetReadDeadline(time.Now().Add(6 * time.Second))
 	if _, err := s.backend.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("backend did not close on expiry: %v", err)
@@ -189,3 +198,5 @@ func TestActiveGrantExpires(t *testing.T) {
 		t.Fatalf("missing deadline, host=%v client=%v", host, client)
 	}
 }
+
+const fixtureCode grant.PairingCode = "00000000-11111111-22222222-33333333"

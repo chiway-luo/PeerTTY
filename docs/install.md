@@ -9,7 +9,8 @@
 ```sh
 git clone https://github.com/chiway-luo/PeerTTY.git
 cd PeerTTY
-go install ./cmd/peertty
+go install -ldflags "-X main.version=$(cat VERSION)" ./cmd/peertty
+peertty --version
 peertty
 ```
 

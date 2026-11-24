@@ -116,3 +116,112 @@ func TestConcurrentRecordsKeepEveryDevice(t *testing.T) {
 		}
 	}
 }
+
+func TestTrustHistoryUpdateRetainsFirstSeenAndNonemptyName(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "device.key")
+	fp := Fingerprint([]byte("fixture"))
+	first := time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
+	last := first.Add(time.Hour)
+	if err := RecordPeer(key, fp, " lab device ", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordPeer(key, fp, "  ", last); err != nil {
+		t.Fatal(err)
+	}
+	if got := LookupPeer(key, fp, ""); got.Trust != PeerKnown || got.PreviousName != "lab device" || !got.LastSeen.Equal(last) {
+		t.Fatalf("blank observed name lost the previous name: %+v", got)
+	}
+	data, err := os.ReadFile(peersPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers, err := decodePeers(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := peers[fp]; !got.FirstSeen.Equal(first) || !got.LastSeen.Equal(last) {
+		t.Fatalf("device seen times not retained: %+v", got)
+	}
+	if err := RecordPeer(key, "invalid", "ignored", last); err != nil {
+		t.Fatal(err)
+	}
+	if got := LookupPeer(key, "invalid", "lab device"); got.Trust != PeerNew {
+		t.Fatalf("invalid fingerprint acquired trust: %+v", got)
+	}
+	if got := LookupPeer("relative.key", fp, "lab device"); got.Trust != PeerNew {
+		t.Fatalf("relative identity used trust history: %+v", got)
+	}
+	after, err := os.ReadFile(peersPath(key))
+	if err != nil || !bytes.Equal(data, after) {
+		t.Fatalf("recorded invalid fingerprint: %v", err)
+	}
+}
+
+func TestConflictingNamePrefersNewestThenFingerprint(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "device.key")
+	a, b := Fingerprint([]byte("first")), Fingerprint([]byte("second"))
+	newPeer := Fingerprint([]byte("lookup"))
+	now := time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
+	for _, fp := range []string{a, b} {
+		if err := RecordPeer(key, fp, "device", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	less, more := min(a, b), max(a, b)
+	check := func(want string, at time.Time) {
+		t.Helper()
+		got := LookupPeer(key, newPeer, " DEVICE ")
+		if got.Trust != PeerKeyMismatch || got.ConflictID != ShortFingerprint(want) || !got.LastSeen.Equal(at) {
+			t.Fatalf("conflicting name = %+v, expected %s at %v", got, ShortFingerprint(want), at)
+		}
+	}
+	for range 5 {
+		check(less, now)
+	}
+	newer := now.Add(time.Minute)
+	if err := RecordPeer(key, more, "device", newer); err != nil {
+		t.Fatal(err)
+	}
+	check(more, newer)
+}
+
+func TestPeerHistoryImportsOnlyNonemptyRecognizedRecords(t *testing.T) {
+	fp := Fingerprint([]byte("history fixture"))
+	first := time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
+	at := first.Format(time.RFC3339)
+	valid := fmt.Sprintf(`{"%s":{"name":"lab","first_seen":"%s","last_seen":"%s"}}`, fp, at, at)
+	for _, tc := range []struct {
+		name, data string
+		trust      PeerTrust
+	}{
+		{"valid", valid, PeerKnown},
+		{"empty", "{}", PeerNew},
+		{"malformed", "{", PeerNew},
+		{"no last seen", fmt.Sprintf(`{"%s":{"first_seen":"%s"}}`, fp, at), PeerNew},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			key := filepath.Join(dir, "device.key")
+			path := filepath.Join(dir, "known_peers.json")
+			if err := os.WriteFile(path, []byte(tc.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ImportDirectoryPeers(key); err != nil {
+				t.Fatal(err)
+			}
+			got := LookupPeer(key, fp, "lab")
+			if got.Trust != tc.trust {
+				t.Fatalf("import trust=%+v, want %v", got, tc.trust)
+			}
+			if tc.trust == PeerNew {
+				if _, err := os.Stat(peersPath(key)); !os.IsNotExist(err) {
+					t.Fatalf("ignored history created a state file: %v", err)
+				}
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || string(raw) != tc.data {
+				t.Fatalf("legacy file mutated: %v", err)
+			}
+		})
+	}
+}

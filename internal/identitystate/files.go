@@ -21,7 +21,13 @@ func Path(key, name string) string {
 	if config, err := os.UserConfigDir(); err == nil && key == filepath.Join(config, "PeerTTY", "device.key") {
 		return filepath.Join(filepath.Dir(key), name)
 	}
-	return filepath.Join(key+".peertty", name)
+	return RuntimePath(key, name)
+}
+
+// Lookup by absolute profile path must also work for clients launched with a
+// different config home (for example a second terminal using -key).
+func RuntimePath(profile, name string) string {
+	return filepath.Join(profile+".peertty", name)
 }
 
 func EnsureDir(path string) error {
@@ -148,6 +154,15 @@ func Update(path string, limit int64, edit func([]byte) ([]byte, error)) error {
 	}
 	if int64(len(data)) > limit {
 		return fmt.Errorf("%s 超过 %d 字节", path, limit)
+	}
+	return Replace(path, data)
+}
+
+// Replace publishes a complete owner-only file. The caller holds the lock
+// protecting the corresponding state for the whole replacement.
+func Replace(path string, data []byte) error {
+	if err := EnsureDir(path); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".peertty-state-*")
 	if err != nil {

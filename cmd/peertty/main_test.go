@@ -11,6 +11,7 @@ import (
 
 	"peertty/internal/active"
 	"peertty/internal/grant"
+	"peertty/internal/localssh"
 )
 
 // run writes command results to stdout. Keep these CLI tests serial.
@@ -162,6 +163,141 @@ func TestCommandContextStops(t *testing.T) {
 		stop()
 		if before != nil || !errors.Is(ctx.Err(), context.Canceled) {
 			t.Errorf("commandContext(%q): before stop = %v, after = %v", args, before, ctx.Err())
+		}
+	}
+}
+
+func TestCLISessionValidationDoesNotAcquireOrLeakIdentity(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "device.key")
+	fp, err := grant.NewIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+	offer := filepath.Join(dir, "offer")
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		cause  error
+		wanted string
+	}{
+		{name: "key required", args: []string{"host", "-offer", offer, "-peer", fp}, wanted: "provide -key"},
+		{name: "offer required", args: []string{"host", "-key", key, "-peer", fp}, wanted: "provide -key"},
+		{name: "identity file missing", args: []string{"host", "-key", missing, "-offer", offer, "-peer", fp}, cause: os.ErrNotExist},
+		{name: "host invalid TTL", args: []string{"host", "-key", key, "-offer", offer, "-peer", fp, "-ttl", "0s"}, wanted: "TTL"},
+		{name: "connect offer file missing", args: []string{"connect", "-key", key, "-offer", offer, "-peer", fp, "-answer", filepath.Join(dir, "reply"), "-code-file", missing}, cause: os.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if out, err := commandOutput(t, tc.args...); out != "" || err == nil || tc.cause != nil && !errors.Is(err, tc.cause) || tc.wanted != "" && !strings.Contains(err.Error(), tc.wanted) {
+				t.Fatalf("output=%q err=%v", out, err)
+			}
+			lease, err := grant.LeaseIdentity(key)
+			if err != nil {
+				t.Fatalf("identity remained busy: %v", err)
+			}
+			if err := lease.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(offer); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("created offer before validation: %v", err)
+			}
+		})
+	}
+	lease, err := grant.LeaseIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	if err := run(t.Context(), []string{"host", "-key", key, "-offer", offer, "-peer", fp}); !errors.Is(err, grant.ErrInUse) {
+		t.Fatalf("did not preserve existing lease: %v", err)
+	}
+}
+
+func TestCLIDoesNotStartNativeToolsWithoutActiveGrant(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"link", "-state-dir", dir, "-t", "echo fixture"}, active.ErrInactive.Error()},
+		{[]string{"link", "-state-dir", dir, "-key", filepath.Join(dir, "key")}, "请选择一个"},
+		{[]string{"link", "-unsupported"}, "flag provided but not defined"},
+		{[]string{"sftp", "-key=" + filepath.Join(dir, "missing"), "-v"}, active.ErrInactive.Error()},
+		{[]string{"fingerprint", "-key", filepath.Join(dir, "missing")}, "missing identity"},
+		{[]string{"menu", "-state-dir", dir, "-stun", "none", "-ttl", "0s", "-ssh-port", "2222", "-no-clipboard"}, "SSH 端口或授权时长无效"},
+		{[]string{"menu", "-ttl", "invalid"}, "invalid value"},
+		{[]string{"doctor", "-stun", "none", "extra"}, "unexpected positional"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			out, err := commandOutput(t, tc.args...)
+			matches := err != nil && strings.Contains(err.Error(), tc.want)
+			if tc.want == "missing identity" {
+				matches = errors.Is(err, os.ErrNotExist)
+			}
+			if out != "" || !matches {
+				t.Fatalf("output=%q err=%v, want %q", out, err, tc.want)
+			}
+		})
+	}
+	if err := run(t.Context(), []string{"sftp", "-h"}); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("SFTP help not handled locally: %v", err)
+	}
+	t.Setenv("PEERTTY_CONSOLE_PROXY", "")
+	if err := run(t.Context(), []string{"_menu-proxy"}); err == nil || !strings.Contains(err.Error(), "终端菜单") {
+		t.Fatalf("missing menu authorization: %v", err)
+	}
+}
+
+func TestInternalCLIEntrypointsRejectMissingInvocationContext(t *testing.T) {
+	t.Setenv("PEERTTY_LINK_KEY", "")
+	t.Setenv("PEERTTY_LINK_ID", "")
+	input, err := os.CreateTemp(t.TempDir(), "empty-worker-input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	previous := os.Stdin
+	os.Stdin = input
+	defer func() { os.Stdin = previous }()
+	if out, err := commandOutput(t, active.Command); err == nil || out == "" {
+		t.Fatalf("unconfigured worker did not report its startup error: %q / %v", out, err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"_link-proxy"}, "请使用 peertty link"},
+		{[]string{localssh.GuardCommand}, "缺少本机授权截止时间"},
+		{[]string{"fingerprint", "extra"}, "unexpected positional arguments"},
+		{[]string{"host", "-key", "unused", "-offer", "unused", "-peer", "not-a-fingerprint"}, "full -peer fingerprint"},
+	} {
+		if out, err := commandOutput(t, tc.args...); err == nil || !strings.Contains(err.Error(), tc.want) || out != "" {
+			t.Errorf("%v: got %q / %v; want %q", tc.args, out, err, tc.want)
+		}
+	}
+}
+
+func TestCLIMenuCancellationExitsCleanlyButPreservesSetupErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	key := filepath.Join(t.TempDir(), "fixture.key")
+	if _, err := grant.NewIdentity(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(ctx, []string{"menu", "-stun", "none", "-key", key}); err != nil {
+		t.Fatalf("menu cancellation should be successful: %v", err)
+	}
+	if err := run(ctx, []string{"menu", "-stun", "none", "-state-dir", filepath.Join(key, "child")}); err == nil {
+		t.Fatalf("cancellation incorrectly hid invalid state directory: %v", err)
+	}
+}
+
+func TestSFTPOptionsPreserveMissingTrailingIdentityValueForFlagParser(t *testing.T) {
+	for _, input := range [][]string{{"-key"}, {"--state-dir"}, {"-key", "device.key", "--state-dir"}} {
+		flags, native := sftpOptions(input)
+		if strings.Join(flags, " ") != strings.Join(input, " ") || len(native) != 0 {
+			t.Fatalf("missing option value was routed to native arguments: %v / %v", flags, native)
 		}
 	}
 }
