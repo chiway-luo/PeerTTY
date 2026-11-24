@@ -14,10 +14,30 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"peertty/internal/grant"
 )
+
+func TestStatusCountdownUsesWorkerBudgetAfterWallClockRollback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		left := 2 * time.Second
+		state := State{Deadline: time.Now().Add(24 * time.Hour).Round(0), Remaining: &left}
+		state.startCountdown()
+		if got := state.TimeLeft(); got != left {
+			t.Fatalf("reported %s for a %s remaining grant", got, left)
+		}
+		time.Sleep(left)
+		if got := state.TimeLeft(); got != 0 {
+			t.Fatalf("countdown still shows %s", got)
+		}
+		legacy := State{Deadline: time.Now().Add(time.Minute).Round(0)}
+		if got := legacy.TimeLeft(); got != time.Minute {
+			t.Fatalf("old worker countdown: %s", got)
+		}
+	})
+}
 
 func TestLocalFramesStaySeparate(t *testing.T) {
 	var stream bytes.Buffer

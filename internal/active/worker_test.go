@@ -321,7 +321,19 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start(Options{Role: "control", Key: operator, Offer: offer, PairingCode: a.PairingCode, User: "fixture"})
+	controlOpts := Options{Role: "control", Key: operator, Offer: offer, PairingCode: a.PairingCode, User: "fixture"}
+	t.Setenv("PEERTTY_ACTIVE_MAIN_FIXTURE", "1")
+	controller, err := Start(ctx, controlOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if st, err := Status(cleanup, operator); err == nil && st.ID == controller.ID {
+			_ = Revoke(cleanup, operator, st.ID)
+		}
+	})
 	b := wait(operator, "waiting")
 	hostFP := grant.Fingerprint(offer.Claims.Issuer)
 	if got := grant.LookupPeer(operator, hostFP, offer.Claims.DeviceName); got.Trust != grant.PeerNew {
@@ -418,6 +430,16 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 	if c, err := Pipe(ctx, operator, b.ID); err == nil {
 		c.Close()
 		t.Fatal("ended grant accepted a new terminal")
+	}
+	if err := WaitEnded(ctx, operator, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Start runs a new OS process with the same profile and the original code.
+	// The revoked invitation is still within its signed wall-clock lifetime.
+	if ttl >= time.Minute {
+		if _, err := Start(ctx, controlOpts); !errors.Is(err, grant.ErrOfferUsed) {
+			t.Fatalf("fresh controller process accepted the previous grant: %v", err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		t.Fatal(err)

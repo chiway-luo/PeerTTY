@@ -212,7 +212,7 @@ func TestControllerStopsBeforeConnectingOnError(t *testing.T) {
 					return peer.call("run")
 				},
 			}
-			settings := Config{Key: key, PairingCode: fixtureCode, Peer: grant.Fingerprint(hostPub)}
+			settings := Config{Key: key, PairingCode: fixtureCode, Peer: grant.Fingerprint(hostPub), Profile: filepath.Join(t.TempDir(), "controller")}
 			invitation := offer
 			if err := fixtureCode.Seal(&invitation); err != nil {
 				t.Fatal(err)
@@ -316,7 +316,7 @@ func TestFileAdaptersPublishAndReportConnectedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status bytes.Buffer
-	o := Options{PairingCode: fixtureCode, Key: operator, Peer: grant.Fingerprint(hostPub), OfferPath: offerPath, Status: &status}
+	o := Options{PairingCode: fixtureCode, Key: operator, Peer: grant.Fingerprint(hostPub), Profile: filepath.Join(t.TempDir(), "controller"), OfferPath: offerPath, Status: &status}
 	if err := deps.fileConnect(t.Context(), o, replyPath, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,21 @@ func TestFileAdaptersPublishAndReportConnectedState(t *testing.T) {
 		t.Fatalf("file controller response: %q, %v", status.String(), err)
 	}
 	status.Reset()
-	if err := deps.fileConnect(t.Context(), o, replyPath, nil); !errors.Is(err, os.ErrExist) || status.Len() != 0 {
+	if err := deps.fileConnect(t.Context(), o, replyPath+".new", nil); !errors.Is(err, grant.ErrOfferUsed) || status.Len() != 0 {
 		t.Fatalf("duplicate reply: %v, status %q", err, status.String())
+	}
+	newOffer, err := grant.NewOffer(host, grant.Fingerprint(opPub), "new invitation", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureCode.Seal(&newOffer); err != nil {
+		t.Fatal(err)
+	}
+	o.OfferPath = offerPath + ".new"
+	if err := newOffer.WriteNew(o.OfferPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.fileConnect(t.Context(), o, replyPath, nil); !errors.Is(err, os.ErrExist) || status.Len() != 0 {
+		t.Fatalf("fresh offer overwrote an existing reply: %v, status %q", err, status.String())
 	}
 }

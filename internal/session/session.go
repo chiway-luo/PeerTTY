@@ -19,6 +19,7 @@ import (
 type Config struct {
 	Key        ed25519.PrivateKey
 	Peer, STUN string
+	Profile    string // Absolute controller profile used to reject spent invitations.
 	// Menu hosts bind to the one reply chosen locally. File-based hosts require a pinned Peer.
 	PairOnApproval bool
 	SSHUser        string
@@ -73,7 +74,10 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	if !cfg.PairOnApproval && !grant.ValidFingerprint(cfg.Peer) {
 		return errors.New("expected the operator's full sha256 fingerprint")
 	}
-	ctx, cancel := context.WithTimeout(parent, ttl)
+	ctx, cancel, err := grant.WithLifetime(parent, time.Now().Add(ttl))
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	expiry, _ := ctx.Deadline()
 	peer, err := deps.peer(ctx, cfg.STUN)
@@ -115,6 +119,9 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	if err := code.VerifyAnswer(offer, answer, time.Now()); err != nil {
 		return err
 	}
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return err
+	}
 	if err := peer.Accept(answer.Claims.SDP); err != nil {
 		return err
 	}
@@ -127,6 +134,9 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 			return fmt.Errorf("批准后 %s 内未建立直连。被控方（%s），控制方（%s）。请检查 UDP 打洞条件，或确认至少一端的 TCP 监听地址可从对端到达", checkWindow, transport.CountCandidates(sdp), transport.CountCandidates(answer.Claims.SDP))
 		}
 		return fmt.Errorf("establish direct path after approval: %w", err)
+	}
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return err
 	}
 	conn, err := deps.open(peer.Context(), port)
 	if err != nil {
@@ -159,16 +169,13 @@ func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ti
 	if peerID == "" {
 		peerID = offer.Sender()
 	}
-	if err := offer.VerifyOffer(peerID, grant.Fingerprint(key.Public().(ed25519.PublicKey)), time.Now()); err != nil {
-		return err
-	}
-	if err := cfg.PairingCode.VerifyProof(offer); err != nil {
-		return err
-	}
 	if offer.Reusable() {
 		return errors.New("请在菜单打开多终端授权邀请")
 	}
-	ctx, cancel := context.WithDeadline(parent, offer.Deadline())
+	ctx, cancel, err := cfg.PairingCode.OpenOffer(parent, cfg.Profile, offer, peerID, grant.Fingerprint(key.Public().(ed25519.PublicKey)))
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	peer, err := deps.peer(ctx, cfg.STUN)
 	if err != nil {
@@ -186,12 +193,18 @@ func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ti
 	if err = cfg.PairingCode.Seal(&answer); err != nil {
 		return err
 	}
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return err
+	}
 	if err := publish(answer); err != nil {
 		return err
 	}
 	wire, route, err := peer.Channel(ctx)
 	if err != nil {
 		return fmt.Errorf("await host approval and direct path: %w", err)
+	}
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return err
 	}
 	connected(route)
 	return deps.run(peer.Context(), wire, endpoint)

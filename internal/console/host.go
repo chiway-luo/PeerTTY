@@ -235,7 +235,7 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 
 func (t *Console) handleHostEnded(ctx context.Context, st active.State, err error) error {
 	t.clearPage()
-	if time.Until(st.Deadline) <= 0 {
+	if st.TimeLeft() <= 0 {
 		if err := active.WaitEnded(ctx, t.KeyPath, st.ID); err != nil {
 			return err
 		}

@@ -203,7 +203,7 @@ func (v terminalView) status(s active.State, err error) string {
 	}
 	field("已连终端", strconv.Itoa(s.Terminals))
 	field("授权到期", s.Deadline.Local().Format("01-02 15:04"))
-	field("剩余时间", max(time.Duration(0), time.Until(s.Deadline)).Round(time.Second).String())
+	field("剩余时间", s.TimeLeft().Round(time.Second).String())
 	if s.Note != "" {
 		fmt.Fprintln(&b, v.margin+s.Note)
 	}

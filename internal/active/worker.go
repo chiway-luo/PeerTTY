@@ -94,13 +94,6 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 		if !opts.Offer.Reusable() {
 			return errors.New("此邀请不支持当前后台授权，请双方升级后重新配对")
 		}
-		if err = opts.Offer.VerifyOffer(grant.Fingerprint(opts.Offer.Claims.Issuer), grant.Fingerprint(key.Public().(ed25519.PublicKey)), now); err != nil {
-			return err
-		}
-		if err = opts.PairingCode.VerifyProof(opts.Offer); err != nil {
-			return err
-		}
-		deadline = opts.Offer.Deadline()
 	default:
 		return errors.New("未知授权角色")
 	}
@@ -109,13 +102,24 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 		return err
 	}
 	defer lease.Close()
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if opts.Role == "host" {
+		ctx, cancel, err = grant.WithLifetime(parent, deadline)
+	} else {
+		ctx, cancel, err = opts.PairingCode.OpenOffer(parent, opts.Key, opts.Offer,
+			grant.Fingerprint(opts.Offer.Claims.Issuer), grant.Fingerprint(key.Public().(ed25519.PublicKey)))
+	}
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	deadline, _ = ctx.Deadline()
 	dir, err := os.MkdirTemp("", "peertty-grant-*")
 	if err != nil {
 		return err
 	}
 	defer func() { result = errors.Join(result, os.RemoveAll(dir)) }()
-	ctx, cancel := context.WithDeadline(parent, deadline)
-	defer cancel()
 	w := &worker{Options: opts, key: key, dir: dir, approval: make(chan grant.Ticket, 1),
 		state: State{ID: filepath.Base(dir), Role: opts.Role, Deadline: deadline, Phase: "gathering", User: opts.User, Identity: opts.Identity, SSHConfig: opts.SSHConfig, RequireScoped: opts.RequireScoped}}
 	if opts.Role == "host" {
@@ -157,7 +161,7 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 		return err
 	}
 	defer os.Remove(discovery)
-	if err = send(started, reply{State: w.state}); err != nil {
+	if err = send(started, reply{State: w.state.withRemaining(ctx)}); err != nil {
 		return err
 	}
 	if started == os.Stdout {
@@ -295,6 +299,9 @@ func (w *worker) runWithLoginPrep(ctx context.Context, p workerPeer, prepare fun
 			return ctx.Err()
 		case answer = <-w.approval:
 		}
+		if err := grant.CheckLifetime(ctx); err != nil {
+			return err
+		}
 		receiptSignature = answer.Signature
 		loginKey = answer.Claims.SSHLoginKey
 		answerSDP = answer.Claims.SDP
@@ -344,6 +351,9 @@ func (w *worker) runWithLoginPrep(ctx context.Context, p workerPeer, prepare fun
 		if err = w.PairingCode.Seal(&answer); err != nil {
 			return err
 		}
+		if err = grant.CheckLifetime(ctx); err != nil {
+			return err
+		}
 		receiptSignature = answer.Signature
 		path := filepath.Join(w.dir, "session.answer")
 		if err = answer.WriteNew(path); err != nil {
@@ -382,6 +392,9 @@ func (w *worker) runWithLoginPrep(ctx context.Context, p workerPeer, prepare fun
 		return fmt.Errorf("双方未建立直连 · %w", err)
 	}
 	defer control.Close()
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	if w.state.Note == waitingNote {
 		w.state.Note = ""
@@ -531,7 +544,7 @@ func (w *worker) leave() {
 
 func (w *worker) serveSSH(ctx context.Context, stream datachannel.ReadWriteCloserDeadliner, scoped bool) {
 	defer stream.Close()
-	if ctx.Err() != nil || !w.enter() {
+	if grant.CheckLifetime(ctx) != nil || !w.enter() {
 		return
 	}
 	defer w.leave()
@@ -563,7 +576,7 @@ func (w *worker) acceptRequest(ctx context.Context, req request, now time.Time) 
 	p := w.peer
 	link := w.linkCtx
 	var err error
-	if req.Op != "status" && (req.ID != s.ID || w.stopping || ctx.Err() != nil) {
+	if req.Op != "status" && (req.ID != s.ID || w.stopping || grant.CheckLifetime(ctx) != nil) {
 		err = errors.New("本次授权已结束")
 	} else {
 		switch req.Op {
@@ -603,7 +616,7 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		return
 	}
 	if req.Op != "link" {
-		_ = send(c, reply{State: w.snapshot()})
+		_ = send(c, reply{State: w.snapshot().withRemaining(ctx)})
 		if req.Op == "revoke" {
 			cancel()
 		}
@@ -623,6 +636,10 @@ func (w *worker) handle(ctx context.Context, c *tls.Conn, cancel context.CancelF
 		return
 	}
 	defer stream.Close()
+	if err = grant.CheckLifetime(link); err != nil {
+		_ = send(c, reply{Error: err.Error()})
+		return
+	}
 	if err = send(c, reply{State: s}); err != nil {
 		return
 	}

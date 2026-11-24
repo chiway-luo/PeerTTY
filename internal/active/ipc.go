@@ -30,11 +30,37 @@ var ErrInactive = errors.New("当前没有有效的 PeerTTY 授权")
 type State struct {
 	ID, Role, Phase, Device, User, Route, Exchange, Note string
 	Deadline                                             time.Time
+	Remaining                                            *time.Duration `json:",omitempty"`
+	localEnd                                             time.Time      // Monotonic countdown after receiving a status snapshot.
 	Terminals                                            int
 	RequireScoped                                        bool
 	PairingCode                                          grant.PairingCode // Host only, available to its menu over loopback mTLS.
 	// Local OpenSSH options for the authorized controller, sent only over local mTLS.
 	Alias, Identity, KnownHosts, SSHConfig string
+}
+
+func (s State) withRemaining(ctx context.Context) State {
+	if left, ok := grant.Remaining(ctx); ok {
+		s.Remaining = &left
+	}
+	return s
+}
+
+func (s *State) startCountdown() {
+	if s.Remaining != nil {
+		s.localEnd = time.Now().Add(*s.Remaining)
+	}
+}
+
+func (s State) TimeLeft() time.Duration {
+	left := time.Until(s.Deadline)
+	if s.Remaining != nil {
+		left = min(left, *s.Remaining)
+	}
+	if !s.localEnd.IsZero() {
+		left = min(left, time.Until(s.localEnd))
+	}
+	return max(0, left)
 }
 
 // CheckAnswer also enforces the login mode that actually passed host preflight.
@@ -201,6 +227,7 @@ func call(ctx context.Context, keyPath string, req request) (*tls.Conn, State, e
 		return nil, st, err
 	}
 	_ = c.SetDeadline(time.Time{})
+	res.State.startCountdown()
 	return c, res.State, nil
 }
 

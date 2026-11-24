@@ -14,10 +14,10 @@ import (
 
 // Options belongs to the CLI file-exchange adapter.
 type Options struct {
-	Key                   ed25519.PrivateKey
-	Peer, STUN, OfferPath string
-	Status                io.Writer
-	PairingCode           grant.PairingCode
+	Key                            ed25519.PrivateKey
+	Peer, STUN, OfferPath, Profile string
+	Status                         io.Writer
+	PairingCode                    grant.PairingCode
 }
 type HostOptions struct {
 	Options
@@ -27,7 +27,7 @@ type HostOptions struct {
 }
 
 func (o Options) config() Config {
-	return Config{Key: o.Key, Peer: o.Peer, STUN: o.STUN, PairOnApproval: o.Peer == "", PairingCode: o.PairingCode}
+	return Config{Key: o.Key, Peer: o.Peer, STUN: o.STUN, Profile: o.Profile, PairOnApproval: o.Peer == "", PairingCode: o.PairingCode}
 }
 
 func Host(ctx context.Context, o HostOptions) error {

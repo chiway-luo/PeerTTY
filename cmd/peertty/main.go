@@ -304,6 +304,7 @@ func runSession(ctx context.Context, command string, fs *flag.FlagSet, parse fun
 		return err
 	}
 	defer lease.Close()
+	opts.Profile = path
 	if command == "host" {
 		opts.Approval = func(ctx context.Context, _ grant.PairingCode) (string, error) { return approval(ctx) }
 		return session.Host(ctx, opts)

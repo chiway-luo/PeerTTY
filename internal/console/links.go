@@ -53,7 +53,7 @@ func phaseName(s active.State) string {
 }
 
 func printStatus(out io.Writer, s active.State) {
-	fmt.Fprintf(out, "%s · %s · %d 个终端 · %s 到期（剩余 %s）\n", roleNames[s.Role], phaseName(s), s.Terminals, s.Deadline.Local().Format("01-02 15:04"), max(time.Duration(0), time.Until(s.Deadline)).Round(time.Second))
+	fmt.Fprintf(out, "%s · %s · %d 个终端 · %s 到期（剩余 %s）\n", roleNames[s.Role], phaseName(s), s.Terminals, s.Deadline.Local().Format("01-02 15:04"), s.TimeLeft().Round(time.Second))
 	showDeviceName(out, "对端", s.Device)
 	if s.Route != "" {
 		fmt.Fprintln(out, "直连路径  "+s.Route)
@@ -176,7 +176,7 @@ func describeLinkExit(id string, err error, fresh active.State, statusErr error)
 
 // Wait only on the grant explicitly selected by the caller, never a newly paired grant.
 func waitReconnect(ctx context.Context, s active.State, diag io.Writer, tick <-chan time.Time, status func(context.Context) (active.State, error)) (active.State, error) {
-	ctx, cancel := context.WithDeadline(ctx, s.Deadline)
+	ctx, cancel := context.WithTimeout(ctx, s.TimeLeft())
 	defer cancel()
 	fmt.Fprintln(diag, reconnectNotice)
 	animate := terminalFile(diag)

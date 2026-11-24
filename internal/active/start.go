@@ -65,12 +65,17 @@ func awaitWorkerStart(ctx context.Context, timeout <-chan time.Time, ready <-cha
 			return state, fmt.Errorf("无法启动后台授权进程: %w", err)
 		}
 		if result.Error != "" {
-			if result.Error == grant.ErrInUse.Error() {
+			switch result.Error {
+			case grant.ErrInUse.Error():
 				return state, grant.ErrInUse
+			case grant.ErrOfferUsed.Error():
+				return state, grant.ErrOfferUsed
 			}
 			return state, errors.New(result.Error)
 		}
-		return result.State, nil
+		state = result.State
+		state.startCountdown()
+		return state, nil
 	}
 }
 

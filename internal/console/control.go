@@ -83,7 +83,7 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 		}
 	}
 	st := active.State{Role: "control", Phase: "gathering", Deadline: offer.Deadline(), Exchange: h.Answer}
-	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN, PairingCode: code}
+	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN, Profile: h.Key, PairingCode: code}
 	return panel.singleUseReceipt(ctx, st, h.Text, func(ctx context.Context, publish func(grant.Ticket) error, ready func(string)) error {
 		return session.RunControl(ctx, cfg, offer, end, publish, func(route string) {
 			close(connected)

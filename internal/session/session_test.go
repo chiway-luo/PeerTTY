@@ -77,6 +77,7 @@ func startPair(t *testing.T, ttl time.Duration, pinned bool) active {
 		controllerOptions.Key, controllerOptions.Peer = opKey, grant.Fingerprint(hostPub)
 	}
 	dir := t.TempDir()
+	controllerOptions.Profile = filepath.Join(dir, "controller")
 	offer, answer := filepath.Join(dir, "session.offer"), filepath.Join(dir, "session.answer")
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
