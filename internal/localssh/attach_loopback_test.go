@@ -86,6 +86,14 @@ func TestAttachConfirmsLocalPortAndReplaysIdentification(t *testing.T) {
 				if err != nil || string(payload) != tc.serverText {
 					t.Fatalf("identification or buffered bytes lost: %q / %v", payload, err)
 				}
+				if tc.ephemeral {
+					cancel()
+					select {
+					case <-c.guard.done:
+					case <-time.After(5 * time.Second):
+						t.Fatal("helper survived grant cancellation while the connection was retained")
+					}
+				}
 				if err := c.Close(); err != nil {
 					t.Fatal(err)
 				}

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"peertty/internal/grant"
 )
 
 const chunkSize = 16 * 1024
@@ -33,13 +35,16 @@ type Endpoint interface {
 // Binary messages carry bytes; ordered text FIN/ACK records preserve TCP half-close.
 func Run(ctx context.Context, wire Channel, local Endpoint) error {
 	defer local.Close()
-	if err := ctx.Err(); err != nil {
+	if err := grant.CheckLifetime(ctx); err != nil {
 		return err
 	}
 	var lock sync.Mutex
 	send := func(data []byte, control bool) error {
 		lock.Lock()
 		defer lock.Unlock()
+		if err := grant.CheckLifetime(ctx); err != nil {
+			return err
+		}
 		n, err := wire.WriteDataChannel(data, control)
 		if err == nil && n != len(data) {
 			return io.ErrShortWrite
@@ -68,7 +73,7 @@ func Run(ctx context.Context, wire Channel, local Endpoint) error {
 			}
 		}
 	}()
-	go func() { results <- receive(wire, local, send, &sentFIN) }()
+	go func() { results <- receive(ctx, wire, local, send, &sentFIN) }()
 	defer func() {
 		// Release in-flight SCTP operations on cancellation, even during backpressure.
 		now := time.Now()
@@ -88,7 +93,7 @@ func Run(ctx context.Context, wire Channel, local Endpoint) error {
 	return ctx.Err()
 }
 
-func receive(wire Channel, local Endpoint, send func([]byte, bool) error, sentFIN *atomic.Bool) error {
+func receive(ctx context.Context, wire Channel, local Endpoint, send func([]byte, bool) error, sentFIN *atomic.Bool) error {
 	buf := make([]byte, chunkSize)
 	var fin, ack bool
 	for !fin || !ack {
@@ -102,6 +107,9 @@ func receive(wire Channel, local Endpoint, send func([]byte, bool) error, sentFI
 		if !control {
 			if fin {
 				return errors.New("received bytes after FIN")
+			}
+			if err := grant.CheckLifetime(ctx); err != nil {
+				return err
 			}
 			written, err := local.Write(buf[:n])
 			if err != nil {

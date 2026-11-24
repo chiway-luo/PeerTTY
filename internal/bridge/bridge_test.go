@@ -83,8 +83,20 @@ func TestShortWriteFailsTheTransfer(t *testing.T) {
 	}
 	wire = newMemoryChannel()
 	wire.in <- record{data: "reply"}
-	if err := receive(wire, shortEndpoint{end}, nil, new(atomic.Bool)); !errors.Is(err, io.ErrShortWrite) {
+	if err := receive(ctx, wire, shortEndpoint{end}, nil, new(atomic.Bool)); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("short local write: %v", err)
+	}
+}
+
+func TestEndedGrantDropsQueuedSSHData(t *testing.T) {
+	ctx, stop := context.WithCancelCause(t.Context())
+	wire := newMemoryChannel()
+	wire.in <- record{data: "queued SSH data"}
+	close(wire.in)
+	stop(context.DeadlineExceeded)
+	end := &memoryEndpoint{}
+	if err := receive(ctx, wire, end, nil, new(atomic.Bool)); !errors.Is(err, context.DeadlineExceeded) || end.Len() != 0 {
+		t.Fatalf("expired receive: %v, delivered %d bytes", err, end.Len())
 	}
 }
 
@@ -154,7 +166,7 @@ func TestReceiveRejectsOutOfOrderOrIncompleteShutdown(t *testing.T) {
 			var sent atomic.Bool
 			sent.Store(tc.sentFIN)
 			end := &memoryEndpoint{}
-			err := receive(wire, end, func([]byte, bool) error { return nil }, &sent)
+			err := receive(t.Context(), wire, end, func([]byte, bool) error { return nil }, &sent)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("got %v, want %s", err, tc.want)
 			}
@@ -228,7 +240,7 @@ func TestBridgePropagatesEndpointAndACKFailures(t *testing.T) {
 			wire.in <- tc.rec
 			end := failingStreamEndpoint{&memoryEndpoint{}, tc.writeErr, tc.halfErr}
 			var ackCalls int
-			err := receive(wire, end, func(p []byte, text bool) error {
+			err := receive(t.Context(), wire, end, func(p []byte, text bool) error {
 				ackCalls++
 				if string(p) != "ACK" || !text {
 					t.Fatal("invalid acknowledgement")

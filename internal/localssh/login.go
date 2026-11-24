@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+
+	"peertty/internal/grant"
 )
 
 // Login holds the host key for exactly one invitation, before a controller is known.
@@ -80,7 +82,12 @@ func (s *Login) Authorize(key ed25519.PublicKey) error {
 	return errors.Join(err, f.Close())
 }
 
-func (s *Login) OpenAuthorized(ctx context.Context) (*Conn, error) { return openLogin(ctx, s.dir) }
+func (s *Login) OpenAuthorized(ctx context.Context) (*Conn, error) {
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return nil, err
+	}
+	return openLogin(ctx, s.dir)
+}
 
 // OpenSSH expands %u in AuthorizedKeysFile. Binding the filename to the OS
 // account prevents the same key from authenticating as a different user.
@@ -124,15 +131,14 @@ func checkUserKeyPolicy(config []byte) error {
 }
 
 func openLogin(ctx context.Context, dir string) (*Conn, error) {
-	until, ok := ctx.Deadline()
-	if !ok {
-		return nil, errors.New("本次登录缺少截止时间")
+	ms, err := guardDeadline(ctx)
+	if err != nil {
+		return nil, err
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	ms := strconv.FormatInt(until.UnixMilli(), 10)
 	addr, mode := "127.0.0.1:22", "login-closed"
 	cmd := exec.Command(exe, GuardCommand, ms)
 	existing, err := dial(ctx, addr)

@@ -58,6 +58,9 @@ func dial(ctx context.Context, addr string) (*net.TCPConn, error) {
 // Open is called only after the local owner has approved the signed answer and
 // ICE has selected the peer. Only a refused default port triggers activation.
 func Open(ctx context.Context, port int) (*Conn, error) {
+	if err := grant.CheckLifetime(ctx); err != nil {
+		return nil, err
+	}
 	return openWith(ctx, port, dial, activate)
 }
 
@@ -127,8 +130,12 @@ func (g *guard) close() error {
 	return g.closeWith(func() error { return g.process.Kill() })
 }
 
-func (g *guard) closeWith(kill func() error) error {
+func (g *guard) closeInput() {
 	g.once.Do(func() { _ = g.input.Close() })
+}
+
+func (g *guard) closeWith(kill func() error) error {
+	g.closeInput()
 	select {
 	case <-g.done:
 		return g.err
@@ -163,16 +170,34 @@ func (g *guard) expect(ctx context.Context, want string) error {
 	return err
 }
 
-func activate(ctx context.Context, addr string) (*Conn, error) {
+// The helper receives a wall timestamp. Project the parent's remaining budget
+// onto the current clock at launch, and keep its private pipe bound to ctx.
+func guardDeadline(ctx context.Context) (string, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return nil, errors.New("临时 SSH 服务需要授权截止时间")
+		return "", errors.New("临时 SSH 服务需要授权截止时间")
+	}
+	if left, ok := grant.Remaining(ctx); ok {
+		if left <= 0 {
+			return "", context.Cause(ctx)
+		}
+		if bound := time.Now().Round(0).Add(left); bound.Before(deadline) {
+			deadline = bound
+		}
+	}
+	return strconv.FormatInt(deadline.UnixMilli(), 10), nil
+}
+
+func activate(ctx context.Context, addr string) (*Conn, error) {
+	ms, err := guardDeadline(ctx)
+	if err != nil {
+		return nil, err
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	return attach(ctx, addr, guardCmd(exe, strconv.FormatInt(deadline.UnixMilli(), 10)))
+	return attach(ctx, addr, guardCmd(exe, ms))
 }
 
 func attach(ctx context.Context, addr string, cmd *exec.Cmd) (_ *Conn, result error) {
@@ -196,6 +221,7 @@ func attach(ctx context.Context, addr string, cmd *exec.Cmd) (_ *Conn, result er
 	}
 	output.Close()
 	g := &guard{input: input, process: cmd.Process, done: make(chan struct{}), lines: make(chan string, 2)}
+	stopInput := context.AfterFunc(ctx, g.closeInput)
 	go func() {
 		scan := bufio.NewScanner(status)
 		for i := 0; i < 2 && scan.Scan(); i++ {
@@ -205,6 +231,7 @@ func attach(ctx context.Context, addr string, cmd *exec.Cmd) (_ *Conn, result er
 		close(g.lines)
 	}()
 	go func() {
+		defer stopInput()
 		if err := cmd.Wait(); err != nil {
 			g.err = fmt.Errorf("临时 SSH: %w (%s)", err, strings.TrimSpace(string(diagnostic)))
 		}
@@ -305,7 +332,10 @@ func serveWith(parent context.Context, args []string, in io.Reader, out io.Write
 	if err != nil || !until.After(time.Now()) || time.Until(until) > grant.MaxTTL {
 		return errors.New("无效的本机授权截止时间")
 	}
-	ctx, cancel := context.WithDeadline(parent, until)
+	ctx, cancel, err := grant.WithLifetime(parent, until)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	ports := make(chan int, 1)
 	go func() {
