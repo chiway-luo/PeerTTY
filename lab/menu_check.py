@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -48,7 +49,7 @@ class Menu:
             time.sleep(0.1)
         # Never print full signed tickets in test logs.
         summary = [s[:240] for s in data.splitlines() if s.strip() and "{" not in s
-                   and not s.startswith("本机指纹") and not re.fullmatch(r"[A-Za-z0-9+/=]+", s)]
+                   and "配对码" not in s and not s.startswith("本机指纹") and not re.fullmatch(r"[A-Za-z0-9+/=]+", s)]
         raise RuntimeError(f"menu did not reach {pattern!r}; recent output: {summary[-18:]}")
 
     def configure(self, stun):
@@ -159,6 +160,39 @@ def check_ticket(role, ticket, mode, blocked):
                 raise RuntimeError(f"{role}: UDP port translation missing from ticket")
             if mode == "nat-dependent" and mapped != ((local & 16383) | 16384):
                 raise RuntimeError(f"{role}: unexpected STUN port for destination-dependent NAT")
+
+
+def tcp_listener(role, ticket, expected):
+    sdp = json.loads(ticket)["claims"]["sdp"]
+    rows = [line.split() for line in sdp.splitlines() if line.startswith("a=candidate:")]
+    ports = {row[5] for row in rows if row[1] == "1" and row[2].lower() == "tcp"
+             and row[4] == LAN[role] and row[7:10] == ["host", "tcptype", "passive"]}
+    if len(ports) != int(expected):
+        raise RuntimeError(f"{role}: unexpected signed TCP listeners on the business interface: {ports}")
+    if ports:
+        port, = ports
+        if not command(role, "ss", "-Hnlt", "sport = :" + port):
+            raise RuntimeError(f"{role}: signed TCP port {port} is not listening")
+        return port
+
+
+def check_tcp_closed(listeners):
+    for role, port in listeners.items():
+        if port and command(role, "ss", "-Hnlt", "sport = :" + port):
+            raise RuntimeError(f"{role}: grant TCP listener {port} survived shutdown")
+
+
+def check_tcp_socket(operator, accepting_role, port):
+    sockets = command(operator, "ss", "-Hnt", "state", "established")
+    for row in sockets.splitlines():
+        ends = []
+        for field in row.split()[-2:]:
+            host, _, service = field.rpartition(":")
+            ip = ipaddress.ip_address(host.strip("[]"))
+            ends.append((str(getattr(ip, "ipv4_mapped", None) or ip), service))
+        if {ip for ip, _ in ends} == set(LAN.values()) and (LAN[accepting_role], port) in ends:
+            return
+    raise RuntimeError(f"no established TCP socket matched the signed listener on {accepting_role}")
 
 
 def check_sudo(operator, target, binary, key, username, allowed, window):
@@ -309,7 +343,7 @@ def check_roaming(guest, windows, dirs, programs, offer, answer):
     print("revocation after migration ended both workers and refused a new SSH terminal", flush=True)
 
 
-def check_third_identity(operator, target, dirs, programs, stun, username, invitation, approved, host, windows):
+def check_third_identity(operator, target, dirs, programs, stun, username, invitation, pairing_code, approved, host, windows):
     def shell_pids():
         pids = []
         for window in windows:
@@ -323,6 +357,8 @@ def check_third_identity(operator, target, dirs, programs, stun, username, invit
     third_dir = f"{dirs[operator]}/third"
     third_key = f"{third_dir}/config/PeerTTY/device.key"
     command(operator, "mkdir", "-p", "-m", "700", f"{third_dir}/tmp")
+    command(operator, "mkdir", "-p", "-m", "700", f"{third_dir}/config/PeerTTY")
+    command(operator, "cp", f"{dirs[operator]}/config/PeerTTY/device.key", third_key)
     with ExitStack() as processes:
         binary = programs[operator]
         processes.callback(subprocess.run, endpoint(operator, binary, "revoke", "-key", third_key),
@@ -330,7 +366,9 @@ def check_third_identity(operator, target, dirs, programs, stun, username, invit
         third = Menu(processes, operator, third_dir, binary,
                      ["menu", "-stun", stun, "-ssh-config", "none", "-no-clipboard"])
         third.expect("❯ ")
-        third.send("1", invitation, username)
+        third.send("1", invitation, "0" * 32)
+        third.expect("配对码与本次凭证不匹配")
+        third.send("1", invitation, pairing_code, username)
         if not approved.get("ssh_login_key"):
             third.send("")  # The independent controller receives no SSH private key.
         reply_path = third.expect(r"回执文件  ([^\r\n]+)\r?\n")[1]
@@ -351,10 +389,7 @@ def check_third_identity(operator, target, dirs, programs, stun, username, invit
             raise RuntimeError("unapproved identity did not receive the expected terminal refusal")
         if "等待被控方批准 · 0 个终端" not in command(operator, binary, "status", "-key", third_key):
             raise RuntimeError("independent identity left its own pending grant")
-        trusted = json.loads(command(target, "cat", f"{dirs[target]}/config/PeerTTY/known_peers.json"))
-        approved_fp = "sha256:" + hashlib.sha256(base64.b64decode(approved["issuer"])).hexdigest()
-        if set(trusted) != {approved_fp}:
-            raise RuntimeError("host recorded an identity other than the approved controller")
+        command(target, "test", "!", "-e", f"{dirs[target]}/config/PeerTTY/known_peers.json")
         if approved.get("ssh_login_key"):
             owner_key = f"{dirs[operator]}/config/PeerTTY/device.key"
             home = command(target, "getent", "passwd", username).split(":")[5]
@@ -370,17 +405,18 @@ def check_third_identity(operator, target, dirs, programs, stun, username, invit
     host.expect_connected_terminals("被控端", 2)
     if shell_pids() != original:
         raise RuntimeError("an authorized shell changed during the identity check")
-    print(f"same-name third identity: replacement receipt refused, link exit {result.returncode}, "
-          f"0 terminals, only approved key trusted; original shell PIDs {', '.join(original)} continued", flush=True)
+    print(f"cloned legacy key: wrong pairing code and replacement receipt refused, link exit {result.returncode}, "
+          f"0 terminals, no persistent trust; original shell PIDs {', '.join(original)} continued", flush=True)
 
 
 def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open", verify_sudo=False,
-          roam=None, before_connect=False, verify_identity=False):
+          roam=None, before_connect=False, verify_identity=False, expected_protocol=None, udp_only_peer=None,
+          accepting_role=None):
     operator, target = ("device", "engineer") if cold else ("engineer", "device")
     nat = mode != "routed"
     failure = outcome in ("blocked", "incompatible")
     with ExitStack() as resources:
-        dirs, programs = {}, {}
+        dirs, programs, listeners = {}, {}, {}
         for role in ("engineer", "device"):
             if nat:
                 private_endpoint(role)
@@ -391,12 +427,17 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             resources.callback(command, role, "rm", "-rf", "--", d)
             command(role, "mkdir", "-m", "700", f"{d}/tmp")
             programs[role] = "peertty"
-            if artifact:
+            binary = udp_only_peer[1] if udp_only_peer and role == udp_only_peer[0] else artifact
+            if binary:
                 dest = f"{d}/peertty"
-                subprocess.run(["limactl", "copy", "--backend=scp", artifact, f"{role}:{dest}"],
+                subprocess.run(["limactl", "copy", "--backend=scp", binary, f"{role}:{dest}"],
                                env=dict(os.environ, LIMA_HOME=str(LAB / ".lima")), check=True, timeout=60)
                 command(role, "chmod", "700", dest)
                 programs[role] = dest
+                if expected_protocol:
+                    digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+                    if command(role, "sha256sum", dest).split()[0] != digest:
+                        raise RuntimeError(f"{role}: binary differs from local build")
         if (roam or verify_identity) and artifact:
             digest = hashlib.sha256(Path(artifact).read_bytes()).hexdigest()
             if any(command(r, "sha256sum", p).split()[0] != digest for r, p in programs.items()):
@@ -421,6 +462,20 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             for role in (operator, target):
                 processes.callback(subprocess.run, endpoint(role, programs[role], "revoke", "-key",
                     f"{dirs[role]}/config/PeerTTY/device.key"), capture_output=True, timeout=20)
+            if verify_identity:
+                keys = {r: f"{dirs[r]}/config/PeerTTY/device.key" for r in (target, operator)}
+                for role, key_path in keys.items():
+                    idle = Menu(processes, role, dirs[role], programs[role], ["menu", "-stun", "none"])
+                    idle.send("/quit")
+                    if idle.process.wait(timeout=10) != 0:
+                        raise RuntimeError("fresh menu failed")
+                    command(role, "test", "!", "-e", key_path)
+                command(operator, programs[operator], "keygen", "-out", keys[operator])
+                transfer(operator, keys[operator], target, keys[target])
+                if command(target, programs[target], "fingerprint", "-key", keys[target]) != command(
+                        operator, programs[operator], "fingerprint", "-key", keys[operator]):
+                    raise RuntimeError("factory image fixture keys differ")
+                print("clean menu created no device key; starting both peers from identical legacy image keys", flush=True)
             host_args = []
             if failure:
                 host_args = ["menu", "-ttl", "105s"]
@@ -431,12 +486,6 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                            ["menu", "-ssh-config", f"{e}/ssh.conf"])
             device.expect("❯ ")
             control.expect("❯ ")
-            # The menu learns these identities from the signed exchange.
-            # The harness also uses them for the pinned CLI/role-lock check.
-            device_fp = command(target, programs[target], "fingerprint", "-key", f"{d}/config/PeerTTY/device.key")
-            control_fp = command(operator, programs[operator], "fingerprint", "-key", f"{e}/config/PeerTTY/device.key")
-            if device_fp == control_fp:
-                raise RuntimeError("devices returned the same identity")
             for menu, role in ((device, target), (control, operator)):
                 spec = STUN[role] if nat else "-"
                 if fallback:
@@ -451,13 +500,6 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             if cold and port22(target):
                 raise RuntimeError("checking host readiness started a listener")
 
-            # Reuse the lab's pinned SSH host key, under the menu's device-specific alias.
-            alias = "peertty-" + device_fp.removeprefix("sha256:")
-            for name, content in (
-                    ("known_hosts", f"{alias} {' '.join(hostkey)}\n"),
-                    ("ssh.conf", f"Host *\n BatchMode yes\n StrictHostKeyChecking yes\n UserKnownHostsFile {e}/known_hosts\n")):
-                command(operator, "sh", "-c", 'umask 077; cat > "$1"', "lab", f"{e}/{name}", input=content)
-
             device.send("2")
             device.expect(readiness)
             if ending == "expire":
@@ -469,6 +511,14 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             offer = device.expect(r"邀请文件  ([^\r\n]+)\r?\n")[1]
             transfer(target, offer, operator, f"{e}/received.offer")
             offer_json = command(operator, "cat", f"{e}/received.offer")
+            # Reuse the lab's pinned SSH host key, under the menu's device-specific alias.
+            alias = "peertty-" + hashlib.sha256(base64.b64decode(json.loads(offer_json)["claims"]["issuer"])).hexdigest()
+            for name, content in (
+                    ("known_hosts", f"{alias} {' '.join(hostkey)}\n"),
+                    ("ssh.conf", f"Host *\n BatchMode yes\n StrictHostKeyChecking yes\n UserKnownHostsFile {e}/known_hosts\n")):
+                command(operator, "sh", "-c", 'umask 077; cat > "$1"', "lab", f"{e}/{name}", input=content)
+
+            pairing_code = device.expect(r"一次性配对码\s+([A-F0-9]{8}(?:-[A-F0-9]{8}){3})")[1]
             if nat:
                 check_ticket(target, offer_json, mode, outcome == "blocked")
             displayed = device.ticket_text("邀请文本", offer_json)
@@ -481,9 +531,9 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             if cold:
                 if len(base64.b64decode(json.loads(offer_json)["claims"].get("ssh_host_key", ""))) != 32:
                     raise RuntimeError("expected an offer for single-approval login")
-                control.send(*inputs, "")
+                control.send(*inputs, pairing_code, "")
             else:
-                control.send(*inputs, username, login)
+                control.send(*inputs, pairing_code, username, login)
             answer = control.expect(r"回执文件  ([^\r\n]+)\r?\n")[1]
             transfer(operator, answer, target, f"{d}/received.answer")
             answer_json = command(target, "cat", f"{d}/received.answer")
@@ -494,11 +544,14 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 raise RuntimeError("offer and answer did not carry their issuing devices' names")
             if nat:
                 check_ticket(operator, answer_json, mode, outcome == "blocked")
+            if expected_protocol:
+                for role, ticket in ((operator, answer_json), (target, offer_json)):
+                    listeners[role] = tcp_listener(role, ticket, not udp_only_peer or role != udp_only_peer[0])
             reply = control.ticket_text("回执文本", answer_json)
             assert_busy(target, programs[target], f"{d}/config/PeerTTY/device.key",
-                        ["connect", "-peer", control_fp, "-offer", offer, "-answer", f"{d}/blocked.answer"])
+                        ["connect", "-offer", offer, "-answer", f"{d}/blocked.answer"])
             assert_busy(operator, programs[operator], f"{e}/config/PeerTTY/device.key",
-                        ["host", "-peer", device_fp, "-offer", f"{e}/blocked.offer"])
+                        ["host", "-offer", f"{e}/blocked.offer"])
             if cold and port22(target):
                 raise RuntimeError("port 22 opened before local approval")
             if delay:
@@ -506,6 +559,8 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             device.send(reply if cold else f"{d}/received.answer")
             device.expect("回执已核验")
             device.expect("y 批准本次连接")
+            if expected_protocol and port22(target, "established"):
+                raise RuntimeError("SSH session opened before local approval")
             if cold and port22(target):
                 raise RuntimeError("pasting a receipt opened port 22 without local approval")
             if before_connect:
@@ -526,11 +581,19 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                     menu.send("0")
                     if menu.process.wait(timeout=10):
                         raise RuntimeError("menu failed to exit after the negative test")
+                check_tcp_closed(listeners)
                 detail = "no STUN mappings" if outcome == "blocked" else "STUN mappings on both sides"
                 print(f"{outcome}: {detail}; no direct channel, port 22 remained closed")
                 return
             host_route = device.expect(r"被控会话已连接 · ([^\r\n]+)\r?\n", 75)[1]
             route = control.expect(r"控制会话已连接 · ([^\r\n]+)\r?\n", 65)[1]
+            if expected_protocol:
+                for selected in (route, host_route):
+                    if not re.fullmatch(expected_protocol + r" (host|srflx|prflx)/(host|srflx|prflx)", selected):
+                        raise RuntimeError(f"expected direct {expected_protocol}, selected {selected}")
+                if expected_protocol == "tcp":
+                    check_tcp_socket(operator, accepting_role, listeners[accepting_role])
+                print(f"selected operator={route}, target={host_route}", flush=True)
             if nat:
                 for selected in (host_route, route):
                     if not re.fullmatch(r"udp (host|srflx|prflx)/(srflx|prflx)", selected):
@@ -559,7 +622,7 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             key = f"{e}/config/PeerTTY/device.key"
             if verify_identity:
                 check_third_identity(operator, target, dirs, programs, STUN[operator] if nat else "none",
-                                     username, displayed, json.loads(answer_json)["claims"], device, (control, other))
+                                     username, displayed, pairing_code, json.loads(answer_json)["claims"], device, (control, other))
             if before_connect:
                 result = command(operator, programs[operator], "link", "-key", key, "--", "ip -4 -o addr show dev roam0")
                 if "10.78.2.2/24" not in result or "换网直连" not in command(operator, programs[operator], "status", "-key", key):
@@ -593,7 +656,10 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 device.send("/revoke")
                 device.expect("本次授权已撤销")
             if ending != "exit":
-                control.expect(r"(?:操作结束 · SSH 连接结束|控制会话已结束)")
+                # Revocation can close the local status socket while the menu
+                # redraws. Confirm actual grant, terminal and socket teardown below.
+                control.expect(r"(?:操作结束 · SSH 连接结束|控制会话已结束|当前没有有效的 PeerTTY 授权|"
+                               r"read tcp4 127\.0\.0\.1:\d+->127\.0\.0\.1:\d+: (?:read: )?connection reset by peer)")
                 if other.process.wait(timeout=20) == 124:
                     raise RuntimeError("the lab timeout, not PeerTTY, closed the second terminal")
                 if ending == "expire":
@@ -612,6 +678,9 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=12)
             if rejected.returncode == 0 or "没有有效" not in rejected.stderr:
                 raise RuntimeError("new link did not report the ended grant")
+            check_tcp_closed(listeners)
+            if expected_protocol and port22(target, "established"):
+                raise RuntimeError("SSH connection survived the end of the grant")
             if ending != "exit":
                 saved = command(target, "sudo", "-n", "-u", username, "--", "cat", "--", retained)
                 if saved.splitlines() != ["window-1", "window-2"]:
@@ -622,7 +691,13 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 details=[line[:200] for line in tail.splitlines() if len(line)<200 and not re.fullmatch(r"[A-Za-z0-9+/=]+",line)]
                 raise RuntimeError(f"controller menu exited after SSH with status {control.process.returncode}: {details[-12:]}")
             control.send("2", "")
-            control.expect(r"邀请文件  [^\r\n]+\r?\n")
+            next_offer = control.expect(r"邀请文件  ([^\r\n]+)\r?\n")[1]
+            next_code = control.expect(r"一次性配对码\s+([A-F0-9]{8}(?:-[A-F0-9]{8}){3})")[1]
+            new_claims = json.loads(command(operator, "cat", next_offer))["claims"]
+            if next_code == pairing_code or new_claims["issuer"] == json.loads(answer_json)["claims"]["issuer"]:
+                raise RuntimeError("new grant reused the code or session signer")
+            control.send(reply)
+            control.expect("回执无效")
             control.send("q")
             control.expect("本次授权已撤销")
             for menu in (control, device):

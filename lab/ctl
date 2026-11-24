@@ -219,7 +219,7 @@ def probe_direction(source, target, mode, code):
                 listener.kill()
 
 
-def probe():
+def probe(expect_blocked=False):
     profile, mode = active_profile()
     print(f"{profile} ({mode})   " + ("target: peer endpoint" if mode == "routed" else "target: remote WAN observer"), flush=True)
     code = (LAB / "udp-probe.py").read_text()
@@ -231,6 +231,40 @@ def probe():
             print(f"{a} -> {b}: {r['received']}/{r['sent']} UDP, "
                   f"duplicates={r['duplicates']}, reordered={r['reordered']}, "
                   f"source={','.join(r['sources']) or '-'}")
+            if expect_blocked and (r["received"] != 0 or r["sent"] != 24):
+                raise RuntimeError(f"UDP block not confirmed on {a} -> {b}")
+
+
+def transport_check(binary, udp_only):
+    from menu_check import check
+    from ssh_check import check as check_proxy, check_direct
+    original = active_profile()
+    try:
+        for role, accepting in zip(ROLES, reversed(ROLES)):
+            set_profile("udp-blocked", "routed")
+            guest(role, "block-inbound-tcp")
+            print("TCP outbound only on", role, flush=True)
+            probe(expect_blocked=True)
+            check_direct(expect_open=accepting == "device")
+            outgoing_controller = role == "engineer"
+            check("routed", binary, False, "revoke" if outgoing_controller else "expire",
+                  delay=40 if outgoing_controller else 0, expected_protocol="tcp",
+                  accepting_role=accepting, verify_identity=outgoing_controller)
+            if outgoing_controller:
+                check_proxy("routed", binary=binary, force_stun=True, expected_protocol="tcp")
+        set_profile("clean", "routed")
+        check("routed", binary, False, "revoke", expected_protocol="udp")
+        if udp_only:
+            for role in ROLES:
+                print("UDP-only build on", role, flush=True)
+                check("routed", binary, False, "revoke", expected_protocol="udp", udp_only_peer=(role, udp_only))
+        set_profile("clean", "nat")
+        check("nat", binary, False, "exit", expected_protocol="udp")
+        set_profile("udp-blocked", "nat")
+        check("nat", binary, True, "exit", outcome="blocked", expected_protocol="none")
+    finally:
+        set_profile(*original)
+        active_profile()
 
 
 def main():
@@ -251,6 +285,9 @@ def main():
     menu.add_argument("--check-identity", action="store_true", help="check that a second controller identity cannot join the active grant")
     punch = cmd.add_parser("punch-check", help="test private endpoints across clean, lossy and UDP-blocked NATs")
     punch.add_argument("--binary", required=True, help="current Linux ARM64 binary")
+    transport = cmd.add_parser("transport-check", help="verify UDP preference, one-sided TCP ingress and double NAT")
+    transport.add_argument("--binary", required=True, help="current Linux ARM64 binary")
+    transport.add_argument("--udp-only-binary", help="also verify a 0.5.0 peer in each role")
     roam = cmd.add_parser("roam-check", help="switch each guest's active interface during one approved grant")
     roam.add_argument("--binary", required=True, help="current Linux ARM64 binary")
     roam.add_argument("--before-connect", action="store_true", help="switch before the first connection and verify grant expiry")
@@ -288,6 +325,11 @@ def main():
                  "closed" if args.closed_ssh else "existing", args.ending, "0", "single", "open",
                  *(["--check-sudo"] if args.check_sudo else []),
                  *(["--check-identity"] if args.check_identity else [])])
+        elif args.action == "transport-check":
+            sys.dont_write_bytecode = True
+            binary = str(Path(args.binary).resolve(strict=True))
+            legacy = str(Path(args.udp_only_binary).resolve(strict=True)) if args.udp_only_binary else None
+            transport_check(binary, legacy)
         elif args.action == "roam-check":
             binary = str(Path(args.binary).resolve(strict=True))
             original = active_profile()

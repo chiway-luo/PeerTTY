@@ -232,6 +232,10 @@ case "$action" in
                 "$server" -public-ip "198.19.$side.2"
         fi
         ;;
+    block-inbound-tcp)
+        [[ $(<"$state/profile") == "udp-blocked routed" ]]
+        ip netns exec "$gw" nft insert rule ip peertty forward iifname wan0 oifname lan0 meta l4proto tcp ct state new counter drop
+        ;;
     status)
         cat /etc/machine-id /proc/sys/kernel/random/boot_id
         if [[ -f $state/profile ]]; then
