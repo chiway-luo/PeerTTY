@@ -14,6 +14,17 @@ import (
 
 func startFakeSTUN(t *testing.T, reply func(sender *net.UDPAddr) (net.IP, int, bool)) netip.AddrPort {
 	t.Helper()
+	return startFakeSTUNWith(t, func(from *net.UDPAddr) stun.Setter {
+		ip, port, ok := reply(from)
+		if !ok {
+			return nil
+		}
+		return &stun.XORMappedAddress{IP: ip, Port: port}
+	})
+}
+
+func startFakeSTUNWith(t *testing.T, reply func(sender *net.UDPAddr) stun.Setter) netip.AddrPort {
+	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -30,12 +41,11 @@ func startFakeSTUN(t *testing.T, reply func(sender *net.UDPAddr) (net.IP, int, b
 			if req.Decode() != nil || req.Type != stun.BindingRequest {
 				continue
 			}
-			ip, port, ok := reply(from)
-			if !ok {
+			attr := reply(from)
+			if attr == nil {
 				continue
 			}
-			resp, err := stun.Build(stun.NewTransactionIDSetter(req.TransactionID), stun.BindingSuccess,
-				&stun.XORMappedAddress{IP: ip, Port: port})
+			resp, err := stun.Build(stun.NewTransactionIDSetter(req.TransactionID), stun.BindingSuccess, attr)
 			if err == nil {
 				_, _ = conn.WriteToUDP(resp.Raw, from)
 			}
@@ -174,5 +184,47 @@ func TestProbeNATEndToEndLocalServersAndHasRemoteSTUN(t *testing.T) {
 	}
 	if !hasRemoteSTUN([]string{"stun:198.51.100.1:3478"}) {
 		t.Fatal("remote IPv4 STUN not detected")
+	}
+}
+
+func TestNATReportIgnoresIncompleteObservations(t *testing.T) {
+	endpoint := netip.MustParseAddrPort("192.0.2.1:3478")
+	mapped := netip.MustParseAddrPort("198.51.100.1:55000")
+	ok := MappingProbe{Endpoint: endpoint, Mapped: mapped}
+	bad := []MappingProbe{
+		{Err: errIPv6Probe, Endpoint: endpoint, Mapped: mapped},
+		{Endpoint: endpoint},
+		{Mapped: mapped},
+	}
+	report := NATReport{Probes: bad}
+	if got := report.Behavior(); got != NATNoResponse {
+		t.Fatalf("incomplete observations counted as replies: got %v", got)
+	}
+	if got := (NATReport{Probes: bad[:2]}).firstMapped(); got.IsValid() {
+		t.Fatalf("failed or missing observations returned a mapping: %v", got)
+	}
+	report.Probes = append(report.Probes, ok, MappingProbe{Endpoint: endpoint, Mapped: netip.MustParseAddrPort("198.51.100.2:5000")})
+	if got := report.Behavior(); got != NATSingleServer {
+		t.Fatalf("one unique successful endpoint counted as %v", got)
+	}
+	if got := (NATReport{Probes: bad[:1]}).Behavior(); got != NATUnknown {
+		t.Fatalf("IPv6-only unsupported entries counted as attempts: %v", got)
+	}
+	if got := (NATReport{}).firstMapped(); got.IsValid() {
+		t.Fatalf("empty report unexpectedly has mapping: %v", got)
+	}
+}
+
+func TestNATVerdictDistinguishesPublicAddressFromStableMapping(t *testing.T) {
+	mapped := netip.MustParseAddrPort("198.51.100.1:55000")
+	report := NATReport{Probes: []MappingProbe{
+		{Endpoint: netip.MustParseAddrPort("192.0.2.1:3478"), Mapped: mapped},
+		{Endpoint: netip.MustParseAddrPort("192.0.2.2:3478"), Mapped: mapped},
+	}}
+	for _, local := range []string{"192.168.1.4:55000", "8.8.4.4:55000"} {
+		report.Local = netip.MustParseAddrPort(local)
+		if got := report.Verdict(); !strings.Contains(got, "映射一致") || strings.Contains(got, "持有公网地址") {
+			t.Errorf("local %s with distinct stable mapping: %q", local, got)
+		}
 	}
 }

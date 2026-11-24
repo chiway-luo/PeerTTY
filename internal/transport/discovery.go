@@ -45,7 +45,8 @@ func STUNServers(spec string) ([]string, error) {
 }
 
 type Candidates struct {
-	IPv4, IPv6, Mapped int
+	IPv4, IPv6, Mapped int // UDP host candidates by family and UDP mappings.
+	TCP                int // Non-loopback addresses accepting an ICE-TCP dial.
 }
 
 // CountCandidates summarizes the exact SDP being signed. Loopback is useful
@@ -65,7 +66,14 @@ func CountCandidates(raw string) Candidates {
 			c, err := ice.UnmarshalCandidate(a.Value)
 			// Pion advertises the same socket for RTP and RTCP components.
 			// The data transport uses component 1 only.
-			if err != nil || c.Component() != 1 || !c.NetworkType().IsUDP() {
+			if err != nil || c.Component() != 1 {
+				continue
+			}
+			if c.NetworkType().IsTCP() {
+				if ip, err := netip.ParseAddr(c.Address()); err == nil && ip.IsGlobalUnicast() &&
+					c.Type() == ice.CandidateTypeHost && c.TCPType() == ice.TCPTypePassive && c.Port() > 0 && c.Port() <= 65535 {
+					result.TCP++
+				}
 				continue
 			}
 			switch c.Type() {
@@ -87,7 +95,7 @@ func CountCandidates(raw string) Candidates {
 }
 
 func (c Candidates) String() string {
-	return fmt.Sprintf("接口 IPv4 %d、IPv6 %d，映射候选 %d", c.IPv4, c.IPv6, c.Mapped)
+	return fmt.Sprintf("UDP 接口 IPv4 %d、IPv6 %d，TCP 监听候选 %d，UDP 映射候选 %d", c.IPv4, c.IPv6, c.TCP, c.Mapped)
 }
 
 // CheckNetwork uses the session's ICE configuration without an identity, a

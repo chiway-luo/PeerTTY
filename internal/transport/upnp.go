@@ -57,9 +57,22 @@ func (m *portMapping) Close() {
 // discoverUPnPGateway broadcasts an SSDP M-SEARCH for an Internet Gateway
 // Device on the local LAN. Returns nil quietly if no IGD responds.
 func discoverUPnPGateway(parent context.Context) *upnpGateway {
+	return discoverUPnPGatewayWith(parent, func() (ssdpSocket, error) {
+		return net.ListenUDP("udp4", &net.UDPAddr{})
+	}, fetchUPnPGateway)
+}
+
+type ssdpSocket interface {
+	ReadFromUDP([]byte) (int, *net.UDPAddr, error)
+	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+	SetReadDeadline(time.Time) error
+	Close() error
+}
+
+func discoverUPnPGatewayWith(parent context.Context, listen func() (ssdpSocket, error), fetch func(context.Context, string, *http.Client) (*upnpGateway, error)) *upnpGateway {
 	ctx, cancel := context.WithTimeout(parent, upnpDiscoveryTimeout)
 	defer cancel()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
+	conn, err := listen()
 	if err != nil {
 		return nil
 	}
@@ -78,10 +91,14 @@ func discoverUPnPGateway(parent context.Context) *upnpGateway {
 
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetReadDeadline(deadline)
+	return awaitUPnPGateway(ctx, conn.ReadFromUDP, fetch)
+}
+
+func awaitUPnPGateway(ctx context.Context, read func([]byte) (int, *net.UDPAddr, error), fetch func(context.Context, string, *http.Client) (*upnpGateway, error)) *upnpGateway {
 	buf := make([]byte, 4096)
 	seen := make(map[string]bool)
 	for ctx.Err() == nil {
-		n, _, err := conn.ReadFromUDP(buf)
+		n, _, err := read(buf)
 		if err != nil {
 			return nil
 		}
@@ -90,7 +107,7 @@ func discoverUPnPGateway(parent context.Context) *upnpGateway {
 			continue
 		}
 		seen[loc] = true
-		if gw, err := fetchUPnPGateway(ctx, loc, nil); err == nil {
+		if gw, err := fetch(ctx, loc, nil); err == nil {
 			return gw
 		}
 	}
@@ -432,7 +449,11 @@ func injectSrflxCandidate(rawSDP string, ext, rel netip.AddrPort, ufrag string) 
 
 // CheckUPnP probes whether a UPnP IGD router on the local LAN responds and reports its external IP.
 func CheckUPnP(ctx context.Context) (string, bool) {
-	gw := discoverUPnPGateway(ctx)
+	return checkUPnPWith(ctx, discoverUPnPGateway)
+}
+
+func checkUPnPWith(ctx context.Context, discover func(context.Context) *upnpGateway) (string, bool) {
+	gw := discover(ctx)
 	if gw == nil {
 		return "", false
 	}

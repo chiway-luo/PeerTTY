@@ -124,7 +124,7 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	stop()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return fmt.Errorf("批准后 %s 内未建立直连。被控方（%s），控制方（%s）。可在两端运行网络自检，检查 UDP 和 STUN", checkWindow, transport.CountCandidates(sdp), transport.CountCandidates(answer.Claims.SDP))
+			return fmt.Errorf("批准后 %s 内未建立直连。被控方（%s），控制方（%s）。请检查 UDP 打洞条件，或确认至少一端的 TCP 监听地址可从对端到达", checkWindow, transport.CountCandidates(sdp), transport.CountCandidates(answer.Claims.SDP))
 		}
 		return fmt.Errorf("establish direct path after approval: %w", err)
 	}

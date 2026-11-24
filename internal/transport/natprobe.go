@@ -117,6 +117,16 @@ func ProbeNAT(parent context.Context, spec string) (NATReport, error) {
 	}
 	ctx, cancel := context.WithTimeout(parent, probeTimeout+2*time.Second)
 	defer cancel()
+	servers := resolveProbeTargets(ctx, urls, net.DefaultResolver.LookupNetIP)
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
+	if err != nil {
+		return NATReport{}, err
+	}
+	defer conn.Close()
+	return probeMappings(ctx, conn, servers, 500*time.Millisecond), nil
+}
+
+func resolveProbeTargets(ctx context.Context, urls []string, lookup func(context.Context, string, string) ([]netip.Addr, error)) []probeTarget {
 	servers := make([]probeTarget, len(urls))
 	var wg sync.WaitGroup
 	for i, raw := range urls {
@@ -140,7 +150,7 @@ func ProbeNAT(parent context.Context, spec string) (NATReport, error) {
 			defer wg.Done()
 			resolveCtx, stop := context.WithTimeout(ctx, probeTimeout)
 			defer stop()
-			addrs, err := net.DefaultResolver.LookupNetIP(resolveCtx, "ip4", host)
+			addrs, err := lookup(resolveCtx, "ip4", host)
 			if err != nil || len(addrs) == 0 {
 				servers[idx].err = fmt.Errorf("无法解析 IPv4 地址: %w", errors.Join(err, errNoIPv4))
 				return
@@ -149,12 +159,7 @@ func ProbeNAT(parent context.Context, spec string) (NATReport, error) {
 		}(i, uri.Host, uri.Port)
 	}
 	wg.Wait()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{})
-	if err != nil {
-		return NATReport{}, err
-	}
-	defer conn.Close()
-	return probeMappings(ctx, conn, servers, 500*time.Millisecond), nil
+	return servers
 }
 
 var errIPv6Probe = errors.New("IPv6 地址不参与 IPv4 NAT 类型检测")

@@ -112,7 +112,7 @@ func TestDiscoveryCountsOnlyUsableDataCandidates(t *testing.T) {
 	} {
 		s.WriteString("a=candidate:" + spec + "\r\n")
 	}
-	want := Candidates{IPv4: 1, IPv6: 1, Mapped: 1}
+	want := Candidates{IPv4: 1, IPv6: 1, Mapped: 1, TCP: 1}
 	if got := CountCandidates(s.String()); got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}

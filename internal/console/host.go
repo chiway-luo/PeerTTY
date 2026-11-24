@@ -109,7 +109,7 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 				t.line("将邀请私发给对方，再粘贴回执或输入文件路径。")
 				t.writeHostPrompt(false)
 			case "connecting":
-				t.line("已批准本次连接。正在进行双向 UDP 探测。")
+				t.line("已批准本次连接。正在检查 UDP 和 TCP 直连路径。")
 				if st.Note != "" {
 					t.line(st.Note)
 				}

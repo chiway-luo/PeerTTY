@@ -227,6 +227,16 @@ func (r *roaming) challenge(path wirePath, now time.Time) {
 }
 
 func (r *roaming) search(connected func() bool) {
+	r.searchWith(connected, func(network string) (*roamSocket, error) {
+		c, err := net.ListenUDP(network, &net.UDPAddr{})
+		if err != nil {
+			return nil, err
+		}
+		return r.socket(c, false), nil
+	})
+}
+
+func (r *roaming) searchWith(connected func() bool, openSpare func(string) (*roamSocket, error)) {
 	var spare [2]*roamSocket
 	defer func() {
 		for _, s := range spare {
@@ -302,11 +312,11 @@ func (r *roaming) search(connected func() bool) {
 					family, network = 1, "udp6"
 				}
 				if spare[family] == nil {
-					c, err := net.ListenUDP(network, &net.UDPAddr{})
+					s, err := openSpare(network)
 					if err != nil {
 						continue
 					}
-					spare[family] = r.socket(c, false)
+					spare[family] = s
 				}
 				r.challenge(wirePath{spare[family], dst}, now)
 			}

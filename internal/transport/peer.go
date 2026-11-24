@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +40,8 @@ type Peer struct {
 	mu          sync.Mutex
 	closed      bool
 	portMap     *portMapping
+	tcpMux      ice.TCPMux
+	startTCP    context.CancelFunc
 }
 
 type peerMode int
@@ -109,7 +110,10 @@ func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) 
 	}
 	settings.DetachDataChannels()
 	settings.EnableDataChannelBlockWrite(true)
-	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
+	settings.SetNetworkTypes([]webrtc.NetworkType{
+		webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6,
+		webrtc.NetworkTypeTCP4, webrtc.NetworkTypeTCP6,
+	})
 	// Loopback only reaches a peer on the same machine. Keep it for offline
 	// and same-host checks, and omit it from tickets that cross a network.
 	settings.SetIncludeLoopbackCandidate(len(urls) == 0)
@@ -122,31 +126,53 @@ func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) 
 	// established route separately, after three missed keepalive intervals.
 	settings.SetICETimeouts(6*time.Second, exchangeWindow, 2*time.Second)
 	settings.SetSCTPMaxMessageSize(16 * 1024)
+	tcpMux, startTCP := newFallbackListener(lifetime)
+	if tcpMux != nil {
+		settings.SetICETCPMux(tcpMux)
+	}
 	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(config)
 	if err != nil {
 		stopRefresh()
 		cancel(err)
+		startTCP()
+		if tcpMux != nil {
+			_ = tcpMux.Close()
+		}
 		return nil, err
 	}
-	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling, roam: roam, tryUPnP: mode != networkDiagnostic && hasRemoteSTUN(urls)}
+	p := &Peer{pc: pc, ready: make(chan opened, 1), lifetime: lifetime, cancel: cancel, stopRefresh: stopRefresh, signaling: signaling, roam: roam, tcpMux: tcpMux, startTCP: startTCP, tryUPnP: mode != networkDiagnostic && hasRemoteSTUN(urls)}
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if mode == reusableSession && state == webrtc.PeerConnectionStateDisconnected {
-			return
-		}
-		switch state {
-		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
-			stopRefresh()
-			cancel(fmt.Errorf("direct connection %s", state))
-		}
+		reportConnectionState(mode, state, stopRefresh, cancel)
 	})
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) { _ = dc.Close() })
 	return p, nil
 }
 
+func reportConnectionState(mode peerMode, state webrtc.PeerConnectionState, stopRefresh context.CancelFunc, cancel context.CancelCauseFunc) {
+	if mode == reusableSession && state == webrtc.PeerConnectionStateDisconnected {
+		return
+	}
+	switch state {
+	case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+		stopRefresh()
+		cancel(fmt.Errorf("direct connection %s", state))
+	}
+}
+
 func (p *Peer) Context() context.Context { return p.lifetime }
 func (p *Peer) Connected() bool          { return p.pc.ConnectionState() == webrtc.PeerConnectionStateConnected }
 
-func (p *Peer) CanRoam() bool { return p.roam != nil && p.roam.keys.Load() != nil }
+func (p *Peer) CanRoam() bool {
+	if p.roam == nil || p.roam.keys.Load() == nil {
+		return false
+	}
+	select {
+	case <-p.roam.done:
+		return false
+	default:
+		return true
+	}
+}
 
 // BindGrant uses the signature of the exact approved answer, which also binds
 // the offer digest, both device identities, SSH keys, scope and signed deadline.
@@ -158,7 +184,7 @@ func (p *Peer) BindGrant(receiptSignature []byte) error {
 }
 
 func (p *Peer) Migrated() bool {
-	if p.roam == nil {
+	if !p.CanRoam() {
 		return false
 	}
 	p.roam.mu.Lock()
@@ -176,11 +202,17 @@ func (p *Peer) Close() error {
 	p.closed = true
 	pm := p.portMap
 	p.portMap = nil
+	mux := p.tcpMux
+	p.tcpMux = nil
 	p.mu.Unlock()
 	if pm != nil {
 		pm.Close()
 	}
-	return p.pc.Close()
+	err := p.pc.Close()
+	if mux != nil {
+		err = errors.Join(err, mux.Close())
+	}
+	return err
 }
 
 func (p *Peer) attach(dc *webrtc.DataChannel) {
@@ -206,12 +238,7 @@ func (p *Peer) Offer(ctx context.Context) (string, error) {
 func (p *Peer) Answer(ctx context.Context, offer string) (string, error) {
 	var accepted atomic.Bool
 	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != label || !dc.Ordered() || dc.MaxRetransmits() != nil ||
-			dc.MaxPacketLifeTime() != nil || !accepted.CompareAndSwap(false, true) {
-			_ = dc.Close()
-			return
-		}
-		p.attach(dc)
+		admitControlChannel(dc, &accepted, func() { p.attach(dc) })
 	})
 	if err := p.setRemote(webrtc.SDPTypeOffer, offer); err != nil {
 		return "", err
@@ -225,22 +252,44 @@ func (p *Peer) Answer(ctx context.Context, offer string) (string, error) {
 
 func (p *Peer) Accept(answer string) error { return p.setRemote(webrtc.SDPTypeAnswer, answer) }
 
+// Incoming channels can be checked without a networked PeerConnection.
+type incomingChannel interface {
+	Label() string
+	Ordered() bool
+	MaxRetransmits() *uint16
+	MaxPacketLifeTime() *uint16
+	Close() error
+	OnOpen(func())
+	DetachWithDeadline() (datachannel.ReadWriteCloserDeadliner, error)
+}
+
+func admitControlChannel(dc incomingChannel, accepted *atomic.Bool, attach func()) {
+	if dc.Label() != label || !dc.Ordered() || dc.MaxRetransmits() != nil ||
+		dc.MaxPacketLifeTime() != nil || !accepted.CompareAndSwap(false, true) {
+		_ = dc.Close()
+		return
+	}
+	attach()
+}
+
 // Each SSH terminal gets a separate ordered SCTP stream on the same
 // authenticated peer connection. Only the approving host enables this handler.
 func (p *Peer) OnLink(handle func(datachannel.ReadWriteCloserDeadliner)) {
-	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != linkLabel || !dc.Ordered() || dc.MaxRetransmits() != nil || dc.MaxPacketLifeTime() != nil {
+	p.pc.OnDataChannel(func(dc *webrtc.DataChannel) { admitTerminalChannel(dc, handle) })
+}
+
+func admitTerminalChannel(dc incomingChannel, handle func(datachannel.ReadWriteCloserDeadliner)) {
+	if dc.Label() != linkLabel || !dc.Ordered() || dc.MaxRetransmits() != nil || dc.MaxPacketLifeTime() != nil {
+		_ = dc.Close()
+		return
+	}
+	dc.OnOpen(func() {
+		stream, err := dc.DetachWithDeadline()
+		if err == nil {
+			handle(stream)
+		} else {
 			_ = dc.Close()
-			return
 		}
-		dc.OnOpen(func() {
-			stream, err := dc.DetachWithDeadline()
-			if err == nil {
-				handle(stream)
-			} else {
-				_ = dc.Close()
-			}
-		})
 	})
 }
 
@@ -299,35 +348,46 @@ func (p *Peer) gather(ctx context.Context, desc webrtc.SessionDescription) (stri
 	}
 	sdp := compactSDP(p.pc.LocalDescription().SDP)
 	if gwCh != nil {
-		var gw *upnpGateway
-		select {
-		case gw = <-gwCh:
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-		if gw != nil {
-			lease := time.Hour
-			if deadline, ok := p.lifetime.Deadline(); ok {
-				if rem := time.Until(deadline); rem > 0 {
-					lease = rem
-				}
-			}
-			var pm *portMapping
-			sdp, pm = mapAndInjectUPnP(ctx, gw, sdp, lease)
-			if pm != nil {
-				p.mu.Lock()
-				if p.closed {
-					p.mu.Unlock()
-					pm.Close()
-				} else {
-					p.portMap = pm
-					p.mu.Unlock()
-				}
-			}
+		var err error
+		sdp, err = p.gatherMapping(ctx, gwCh, sdp, mapAndInjectUPnP)
+		if err != nil {
+			return "", err
 		}
 	}
 	if p.roam != nil {
 		sdp = p.roam.advertise(sdp)
+	}
+	return sdp, nil
+}
+
+// Discovery runs alongside ICE. Once it finishes, either retain the mapping as
+// part of this peer's lifetime or close it if shutdown won the race.
+func (p *Peer) gatherMapping(ctx context.Context, gateways <-chan *upnpGateway, sdp string, inject func(context.Context, *upnpGateway, string, time.Duration) (string, *portMapping)) (string, error) {
+	var gw *upnpGateway
+	select {
+	case gw = <-gateways:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if gw == nil {
+		return sdp, nil
+	}
+	lease := time.Hour
+	if deadline, ok := p.lifetime.Deadline(); ok {
+		if rem := time.Until(deadline); rem > 0 {
+			lease = rem
+		}
+	}
+	sdp, pm := inject(ctx, gw, sdp, lease)
+	if pm != nil {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			pm.Close()
+		} else {
+			p.portMap = pm
+			p.mu.Unlock()
+		}
 	}
 	return sdp, nil
 }
@@ -350,53 +410,20 @@ func compactSDP(raw string) string {
 
 func (p *Peer) setRemote(kind webrtc.SDPType, raw string) error {
 	desc := webrtc.SessionDescription{Type: kind, SDP: raw}
-	parsed, err := desc.Unmarshal()
+	candidates, err := prepareRemoteICE(&desc)
 	if err != nil {
 		return err
-	}
-	if len(parsed.MediaDescriptions) != 1 || parsed.MediaDescriptions[0].MediaName.Media != "application" {
-		return errors.New("expected a single data-channel description")
-	}
-	count := 0
-	var mapped []netip.AddrPort
-	var contacts []netip.AddrPort
-	var roamKey string
-	for _, attr := range parsed.MediaDescriptions[0].Attributes {
-		if attr.Key == roamAttribute {
-			roamKey = attr.Value
-		}
-		if attr.Key == "candidate" {
-			candidate, err := ice.UnmarshalCandidate(attr.Value)
-			if err != nil || candidate.Type() == ice.CandidateTypeRelay {
-				return errors.New("invalid or relayed ICE candidate")
-			}
-			if candidate.Component() == 1 && candidate.NetworkType().IsUDP() {
-				ip, err := netip.ParseAddr(candidate.Address())
-				if err == nil && (ip.IsGlobalUnicast() || ip.IsLoopback()) && candidate.Port() > 0 && candidate.Port() <= 65535 {
-					addr := netip.AddrPortFrom(ip.Unmap(), uint16(candidate.Port()))
-					if !slices.Contains(contacts, addr) {
-						contacts = append(contacts, addr)
-					}
-					if candidate.Type() == ice.CandidateTypeServerReflexive && ip.IsGlobalUnicast() && !slices.Contains(mapped, addr) {
-						mapped = append(mapped, addr)
-					}
-				}
-			}
-			count++
-		}
-	}
-	if count == 0 {
-		return errors.New("peer has no direct ICE candidate")
 	}
 	if err := p.pc.SetRemoteDescription(desc); err != nil {
 		return err
 	}
 	if p.signaling != nil {
-		p.signaling.remote.Store(&mapped)
+		p.signaling.remote.Store(&candidates.mapped)
 	}
 	if p.roam != nil {
-		p.roam.setRemote(roamKey, kind == webrtc.SDPTypeAnswer, contacts)
+		p.roam.setRemote(candidates.roamKey, kind == webrtc.SDPTypeAnswer, candidates.contacts)
 	}
+	go p.enableTCPFallback(candidates)
 	return nil
 }
 
@@ -412,13 +439,24 @@ func (p *Peer) Channel(ctx context.Context) (datachannel.ReadWriteCloserDeadline
 			return nil, "", result.err
 		}
 		pair, err := p.pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
-		if err != nil || pair == nil {
-			return nil, "", errors.New("no selected ICE candidate pair")
+		route, err := directRoute(pair, err)
+		if err != nil {
+			return nil, "", err
 		}
-		if pair.Local.Typ == webrtc.ICECandidateTypeRelay || pair.Remote.Typ == webrtc.ICECandidateTypeRelay {
-			return nil, "", errors.New("relayed path rejected")
+		if pair.Local.Protocol == webrtc.ICEProtocolTCP && p.roam != nil {
+			// The UDP path-recovery protocol cannot migrate a TCP stream.
+			p.roam.close()
 		}
-		route := fmt.Sprintf("%s %s/%s", pair.Local.Protocol, pair.Local.Typ, pair.Remote.Typ)
 		return result.channel, route, nil
 	}
+}
+
+func directRoute(pair *webrtc.ICECandidatePair, err error) (string, error) {
+	if err != nil || pair == nil {
+		return "", errors.New("no selected ICE candidate pair")
+	}
+	if pair.Local.Typ == webrtc.ICECandidateTypeRelay || pair.Remote.Typ == webrtc.ICECandidateTypeRelay {
+		return "", errors.New("relayed path rejected")
+	}
+	return fmt.Sprintf("%s %s/%s", pair.Local.Protocol, pair.Local.Typ, pair.Remote.Typ), nil
 }
