@@ -18,6 +18,8 @@ const (
 	currentVersion = 4
 )
 
+var errTicketLifetime = errors.New("凭证已过期或有效期超出允许范围")
+
 type Claims struct {
 	Version     int    `json:"version"`
 	OneShot     bool   `json:"one_shot,omitempty"`
@@ -246,7 +248,7 @@ func (t Ticket) verify(kind, sender, recipient string, now time.Time) error {
 	}
 	life := t.Deadline().Sub(now)
 	if life <= 0 || life > MaxTTL+time.Minute {
-		return errors.New("凭证已过期或有效期超出允许范围")
+		return errTicketLifetime
 	}
 	return nil
 }

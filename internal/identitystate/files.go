@@ -118,6 +118,16 @@ func ImportLegacy(key, name string, limit int64, recognized func([]byte) bool) e
 // Update serializes a read/modify/replace across menus and worker processes.
 // A persistent lock file stays valid across atomic replacements of the data.
 func Update(path string, limit int64, edit func([]byte) ([]byte, error)) error {
+	return update(path, limit, edit, false)
+}
+
+// UpdateDurable also flushes the new contents and their directory entry
+// before returning. A controller uses it before publishing a receipt.
+func UpdateDurable(path string, limit int64, edit func([]byte) ([]byte, error)) error {
+	return update(path, limit, edit, true)
+}
+
+func update(path string, limit int64, edit func([]byte) ([]byte, error), durable bool) error {
 	if err := EnsureDir(path); err != nil {
 		return err
 	}
@@ -155,12 +165,16 @@ func Update(path string, limit int64, edit func([]byte) ([]byte, error)) error {
 	if int64(len(data)) > limit {
 		return fmt.Errorf("%s 超过 %d 字节", path, limit)
 	}
-	return Replace(path, data)
+	return replace(path, data, durable)
 }
 
 // Replace publishes a complete owner-only file. The caller holds the lock
 // protecting the corresponding state for the whole replacement.
 func Replace(path string, data []byte) error {
+	return replace(path, data, false)
+}
+
+func replace(path string, data []byte, durable bool) error {
 	if err := EnsureDir(path); err != nil {
 		return err
 	}
@@ -170,8 +184,14 @@ func Replace(path string, data []byte) error {
 	}
 	defer os.Remove(tmp.Name())
 	_, writeErr := tmp.Write(data)
+	if writeErr == nil && durable {
+		writeErr = tmp.Sync()
+	}
 	if err := errors.Join(writeErr, tmp.Close()); err != nil {
 		return err
+	}
+	if durable {
+		return durableRename(tmp.Name(), path)
 	}
 	return os.Rename(tmp.Name(), path)
 }

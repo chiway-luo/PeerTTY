@@ -200,7 +200,10 @@ func TestPeerHistoryImportsOnlyNonemptyRecognizedRecords(t *testing.T) {
 		{"no last seen", fmt.Sprintf(`{"%s":{"first_seen":"%s"}}`, fp, at), PeerNew},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := filepath.Join(t.TempDir(), "profile")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
 			key := filepath.Join(dir, "device.key")
 			path := filepath.Join(dir, "known_peers.json")
 			if err := os.WriteFile(path, []byte(tc.data), 0600); err != nil {
