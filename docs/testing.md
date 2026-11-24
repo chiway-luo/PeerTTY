@@ -20,3 +20,17 @@ python3 scripts/coverage_badge.py coverage.out
 ```
 
 运行 `go test ./...` 同时验证原生 SSH 子进程、后台授权和两端连接。用 `go vet ./...` 做静态检查，`go test -race ./...` 检查竞态。真实双机网络和原生安装包的验证另有记录。[测试工作流](../.github/workflows/test.yml) · [双机网络实验](../lab/README.md) · [多终端授权验证](verification-2026-11-21.md) · [早期版本验证](verification-2026-11-20.md)
+
+## 单元测试分支覆盖率
+
+在仓库根目录运行：
+
+```sh
+go run scripts/branchcov.go selftest
+go run scripts/branchcov.go > branches.txt
+tail -1 branches.txt
+```
+
+第二条命令在临时副本中测试，不改工作区或生产二进制。只统计当前平台的项目生产 Go 包，执行 `go test -short -count=1`，不计测试文件、第三方依赖或其他平台独有代码。报告以 `MISS` 列出未覆盖位置，`FILE` 汇总逐文件，`TOTAL` 给出覆盖数/总数；按未四舍五入的计数严格比较是否超过 90%。
+
+本报告的口径是可观察的源代码分支结果：`if`、有条件的 `for` 和无标签值的 `switch` 条件的真/假；短路布尔表达式实际求值的子条件真/假；`switch`、类型 `switch` 与 `select` 进入的分支（无默认分支的 `switch` 还算未匹配）；`range` 的零次/至少一次。短路跳过的操作数不记为已执行。无条件循环不虚构退出分支。这个结果不是路径覆盖、MC/DC 或 Go 原生语句覆盖率；上面的徽章仍按语句口径统计。暂不支持 cgo、`goto`、`fallthrough` 和带标签的 `range`，遇到时显式报错而非略过。
