@@ -28,6 +28,9 @@ if [ "$format" = deb ]; then
 else
     mkdir -p "$root/var/lib/rpm"
     rpmdb --root "$root" --dbpath /var/lib/rpm --initdb
+    public=${RPM_PUBLIC_KEY:-"$(dirname "$0")/keys/peertty-rpm.asc"}
+    rpmkeys --root "$root" --dbpath /var/lib/rpm --import "$public"
+    rpmkeys --root "$root" --dbpath /var/lib/rpm --define '_pkgverify_level all' --checksig "$first" "$second"
 fi
 PATH="$root/usr/bin:$PATH"
 export PATH

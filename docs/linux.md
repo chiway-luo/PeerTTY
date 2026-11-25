@@ -20,7 +20,15 @@ peertty
 <details>
 <summary>无桌面的服务器或其他发行版如何安装</summary>
 
-在下载目录安装。Debian / Ubuntu 使用 `sudo apt install "./peertty_$(dpkg --print-architecture).deb"`，Fedora / RHEL 使用 `sudo dnf install "./peertty.$(uname -m).rpm"`。
+在下载目录安装。Debian / Ubuntu 使用 `sudo apt install "./peertty_$(dpkg --print-architecture).deb"`。
+
+Fedora / RHEL 从同版 Release 下载 RPM 和 `peertty-rpm.asc`。首次安装时运行 `gpg --show-keys --with-fingerprint ./peertty-rpm.asc`，核对发行主钥指纹 **EF6D 3246 97FD 1C2C 5DFA F8DB 1F00 A1E4 EE0C 0DC5**，然后导入公钥、验签并安装。[仓库中的发行公钥](../packaging/keys/peertty-rpm.asc)
+
+```sh
+sudo rpmkeys --import ./peertty-rpm.asc
+rpmkeys --define '_pkgverify_level all' --checksig "./peertty.$(uname -m).rpm"
+sudo dnf install "./peertty.$(uname -m).rpm"
+```
 
 其他 64 位发行版可取单文件程序。x86-64 运行 `sudo install -m 0755 peertty-linux-amd64 /usr/local/bin/peertty`，ARM64 将文件名改为 `peertty-linux-arm64`。[构建单文件程序](install.md#构建安装包)
 

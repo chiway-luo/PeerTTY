@@ -1,0 +1,89 @@
+name: Sign draft RPMs
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag, for example v0.6.4
+        required: true
+        type: string
+      installer_run:
+        description: Check native installers run ID for that exact tag
+        required: true
+        type: string
+concurrency:
+  group: rpm-signing-${{ inputs.tag }}
+  cancel-in-progress: false
+permissions: {}
+env:
+  GH_REPO: ${{ github.repository }}
+  TAG: ${{ inputs.tag }}
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: rpm-release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the draft and fetch the tagged installer build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN: ${{ inputs.installer_run }}
+        run: |
+          python3 -m unittest discover -s packaging -p 'test_draft_rpms.py'
+          python3 packaging/draft_rpms.py prepare "$TAG" "$RUNNER_TEMP/rpm-work" --run-id "$INSTALLER_RUN"
+      - name: Prepare native RPM tools
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -y install rpm gnupg
+          docker pull fedora:45
+      - name: Sign the two RPMs
+        env:
+          RPM_SIGNING_SUBKEY: ${{ secrets.RPM_SIGNING_SUBKEY }}
+        run: |
+          set -eu
+          umask 077
+          key=${RPM_SIGNING_SUBKEY:?missing signing subkey}
+          unset RPM_SIGNING_SUBKEY
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          trap 'gpgconf --kill all; rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s\n' "$key" | gpg --batch --import
+          unset key
+          gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="sec" {count++; if ($15!="#") bad=1} END {exit(count!=1 || bad)}'
+          dir="$RUNNER_TEMP/rpm-work/installers"
+          sh packaging/sign-rpms.sh packaging/keys/peertty-rpm.asc "$dir/peertty.x86_64.rpm" "$dir/peertty.aarch64.rpm"
+      - name: Verify both signatures and install the x86_64 RPM in Fedora
+        run: |
+          docker run --rm --network none -v "$RUNNER_TEMP/rpm-work/installers:/packages:ro" -v "$GITHUB_WORKSPACE/packaging:/verify:ro" fedora:45 \
+            sh /verify/check-signed-rpms.sh /packages "${TAG#v}" /verify/keys/peertty-rpm.asc
+      - name: Update the existing draft and verify remote digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 packaging/draft_rpms.py upload "$TAG" "$RUNNER_TEMP/rpm-work"
+
+  verify-arm:
+    needs: sign
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Retrieve signed RPMs from the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --dir "$RUNNER_TEMP/rpms" --pattern 'peertty.*.rpm' --pattern peertty-rpm.asc
+          cmp packaging/keys/peertty-rpm.asc "$RUNNER_TEMP/rpms/peertty-rpm.asc"
+      - name: Install the signed aarch64 RPM in Fedora
+        run: |
+          docker pull fedora:45
+          docker run --rm --network none -v "$RUNNER_TEMP/rpms:/packages:ro" -v "$GITHUB_WORKSPACE/packaging:/verify:ro" fedora:45 \
+            sh /verify/check-signed-rpms.sh /packages "${TAG#v}" /verify/keys/peertty-rpm.asc

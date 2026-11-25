@@ -81,6 +81,24 @@ jobs:
         with:
           name: upgrade-test-only
           path: second
+      - name: Sign disposable RPM upgrade fixtures
+        if: endsWith(matrix.name, '.rpm')
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          dnf -y install rpm-sign gnupg2
+          GNUPGHOME=$(mktemp -d)
+          export GNUPGHOME
+          trap 'gpgconf --kill all; rm -rf -- "$GNUPGHOME"' EXIT
+          gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'PeerTTY installer test' rsa3072 cert 1d
+          fp=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10; exit}')
+          gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key "$fp" rsa3072 sign 1d
+          public="$RUNNER_TEMP/fixture-rpm.asc"
+          gpg --armor --export "$fp" > "$public"
+          sh packaging/sign-rpms.sh "$public" "first/$PACKAGE" "second/$PACKAGE"
+          echo "RPM_PUBLIC_KEY=$public" >> "$GITHUB_ENV"
       - run: sh packaging/check-linux.sh "first/${{ matrix.name }}" "second/${{ matrix.name }}"
 
   windows:

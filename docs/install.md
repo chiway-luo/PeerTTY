@@ -20,7 +20,7 @@ peertty
 
 使用有仓库访问权的账号打开 Releases，下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[PeerTTY Releases](https://github.com/chiway-luo/PeerTTY/releases)
 
-在仓库 Actions 中打开 **Check native installers**。成功完成构建的运行会在 **Artifacts** 中提供 `installers` 下载。解压后按平台手册安装或升级。[安装包构建记录](https://github.com/chiway-luo/PeerTTY/actions/workflows/installers.yml)
+仓库 Actions 中的 **Check native installers** 提供安装与升级回归使用的构建产物。Fedora / RHEL 用户从正式 Release 下载带发行签名的 RPM 和 `peertty-rpm.asc`。[安装包构建记录](https://github.com/chiway-luo/PeerTTY/actions/workflows/installers.yml)
 
 | 平台 | 安装包 | 操作说明 |
 | --- | --- | --- |
@@ -38,3 +38,11 @@ python3 packaging/build.py
 ```
 
 `VERSION` 决定安装包的版本。单文件程序写入 `dist/`，安装包与 `SHA256SUMS` 写入 `dist/installers/<版本>/`。可加 `--target macos`、`--target windows` 或 `--target linux` 只打一个平台。在安装包目录运行 `shasum -a 256 -c SHA256SUMS` 校验文件。[打包脚本](../packaging/build.py)
+
+## 为 Release 草稿签署 RPM
+
+1. 在版本标签上运行 **Check native installers**。用该次运行的 `installers` 附件建立同一标签的 Release 草稿，记下运行 ID。
+2. 在 `main` 上运行 **Sign draft RPMs**，填写标签和安装包运行 ID。仓库负责人在 `rpm-release` 环境审核该任务。[RPM 签名工作流](../.github/workflows/sign-rpms.yml)
+3. 工作流从标签对应的构建中取回两份 RPM，签名后核对包内容，更新草稿中的 RPM、发行公钥和 `SHA256SUMS`。Fedora 任务验证两种架构的签名，并运行安装后的程序。签名完成后由维护者决定何时公开草稿。
+
+发行认证主钥保存在维护者的本机钥匙串。轮换签名子钥时，更新仓库内的发行公钥和受保护环境中的 `RPM_SIGNING_SUBKEY`。该密钥项使用 GnuPG 的 `--export-secret-subkeys` 导出，只包含签名子钥的私有部分。安装包升级测试使用独立的临时测试密钥。[发行公钥](../packaging/keys/peertty-rpm.asc)
