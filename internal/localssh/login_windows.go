@@ -57,7 +57,7 @@ func PrepareLogin(ctx context.Context) (*Login, error) {
 	return s, nil
 }
 
-func closedLoginGuard(exe, ms string) *exec.Cmd { return guardCmd(exe, ms) }
+func loginGuard(exe, ms string, _ bool) *exec.Cmd { return guardCmd(exe, ms) }
 
 func windowsLoginArgs(ctx context.Context, dir string, port int) ([]string, error) {
 	name, home, err := windowsLoginAccount()
@@ -76,7 +76,7 @@ func windowsLoginArgs(ctx context.Context, dir string, port int) ([]string, erro
 		return fmt.Sprintf("user=%s,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=%d", name, p)
 	}
 	base := func(p int) ([]byte, error) {
-		return exec.CommandContext(ctx, path, "-T", "-h", filepath.Join(dir, "host.key"), "-C", match(p)).Output()
+		return backgroundCommand(ctx, path, "-T", "-h", filepath.Join(dir, "host.key"), "-C", match(p)).Output()
 	}
 	original, err := base(22)
 	if err != nil {
@@ -92,7 +92,7 @@ func windowsLoginArgs(ctx context.Context, dir string, port int) ([]string, erro
 		}
 	}
 	args := append(windowsListenArgs(port), loginArgs(dir)...)
-	config, err := exec.CommandContext(ctx, path, append([]string{"-T", "-C", match(port)}, args...)...).Output()
+	config, err := backgroundCommand(ctx, path, append([]string{"-T", "-C", match(port)}, args...)...).Output()
 	if err != nil {
 		return nil, err
 	}

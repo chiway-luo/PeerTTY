@@ -133,8 +133,16 @@ func processInGuardJob(pid uint32, job windows.Handle) (bool, error) {
 	return member != 0, nil
 }
 
+// The detached grant worker has no console to inherit. Set the flag on both
+// the guard and each native sshd invocation, including configuration probes.
+func backgroundCommand(ctx context.Context, path string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return cmd
+}
+
 func guardCmd(exe, deadline string) *exec.Cmd {
-	return exec.Command(exe, GuardCommand, deadline)
+	return backgroundCommand(context.Background(), exe, GuardCommand, deadline)
 }
 
 // The guard is a dedicated subprocess. Its non-inheritable job handle lives
@@ -171,7 +179,7 @@ func windowsSSHDArgs() []string {
 func checkWindowsConfig(ctx context.Context, path string) error {
 	// ListenAddress is additive. Keep the system's account and Match policy,
 	// and refuse to launch if it also requests a network-facing listener.
-	check := exec.CommandContext(ctx, path, append([]string{"-T"}, windowsSSHDArgs()...)...)
+	check := backgroundCommand(ctx, path, append([]string{"-T"}, windowsSSHDArgs()...)...)
 	var diag bytes.Buffer
 	check.Stderr = &diag
 	config, err := check.Output()
@@ -253,7 +261,7 @@ func serveLocal(ctx context.Context, ports <-chan int, out io.Writer, mode, dir 
 func runWindowsSSHD(ctx context.Context, job windows.Handle, path string, args []string, port int, ready string, ports <-chan int, out io.Writer) (error, bool) {
 	run, cancel := context.WithCancel(ctx)
 	defer cancel()
-	server := exec.CommandContext(run, path, args...)
+	server := backgroundCommand(run, path, args...)
 	server.Stderr = os.Stderr
 	if err := server.Start(); err != nil {
 		return err, false

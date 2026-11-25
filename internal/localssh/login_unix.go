@@ -151,8 +151,8 @@ func verifyLoginSSHDWith(ctx context.Context, dir, account string, cred *syscall
 	return checkLoginPolicy(config, dir)
 }
 
-func closedLoginGuard(exe, ms string) *exec.Cmd {
-	if err := probeBind22(); errors.Is(err, os.ErrPermission) {
+func loginGuard(exe, ms string, portClosed bool) *exec.Cmd {
+	if portClosed && errors.Is(probeBind22(), os.ErrPermission) {
 		return guardCmd(exe, ms)
 	}
 	return exec.Command(exe, GuardCommand, ms)

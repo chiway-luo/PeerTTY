@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -140,16 +139,14 @@ func openLogin(ctx context.Context, dir string) (*Conn, error) {
 		return nil, err
 	}
 	addr, mode := "127.0.0.1:22", "login-closed"
-	cmd := exec.Command(exe, GuardCommand, ms)
 	existing, err := dial(ctx, addr)
 	if err == nil {
 		existing.Close()
 		mode, addr = "login-open", "127.0.0.1:0"
 	} else if !errors.Is(err, refused) {
 		return nil, err
-	} else {
-		cmd = closedLoginGuard(exe, ms)
 	}
+	cmd := loginGuard(exe, ms, mode == "login-closed")
 	cmd.Args = append(cmd.Args, mode, dir)
 	return attach(ctx, addr, cmd)
 }
