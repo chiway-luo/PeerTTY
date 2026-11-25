@@ -80,6 +80,7 @@ func TestSSHArgumentsMatchSessionAndCommand(t *testing.T) {
 }
 
 func TestHostPanelDistinguishesApprovalAndLiveControls(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 	var out bytes.Buffer
 	c := Console{out: &out, fullScreen: true}
 	state := active.State{Role: "host", Phase: "waiting", Deadline: time.Now().Add(time.Hour)}
@@ -87,7 +88,7 @@ func TestHostPanelDistinguishesApprovalAndLiveControls(t *testing.T) {
 	answer := grant.Ticket{Claims: grant.Claims{DeviceName: "engineer", SSHLoginKey: []byte{1}}}
 	c.hostInputPrompt(state, offer, &answer)
 	s := ansi.Strip(out.String())
-	for _, part := range []string{"engineer", "fixture", "y 批准", "r 重选", "q 撤销"} {
+	for _, part := range []string{"engineer", "fixture", "[y] 批准", "[r] 重选", "[q] 撤销"} {
 		if !strings.Contains(s, part) {
 			t.Fatal("missing approval information", part)
 		}
@@ -133,7 +134,7 @@ func TestHostPanelCanReviewAndDiscardAReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "input")
-	input := strings.Join([]string{"v", filepath.Join(dir, "missing"), reply, "r", "b", ""}, "\n")
+	input := strings.Join([]string{"d", "v", filepath.Join(dir, "missing"), reply, "r", "b", ""}, "\n")
 	if err := os.WriteFile(path, []byte(input), 0600); err != nil {
 		t.Fatal(err)
 	}

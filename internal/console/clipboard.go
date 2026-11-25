@@ -20,11 +20,14 @@ func clipboardChoice(s string) bool {
 }
 
 func (t *Console) shareTicket(ctx context.Context, kind string, ticket grant.Ticket, copyOn, show bool) error {
-	copy := t.copyToClipboard
-	if copy == nil {
-		copy = copyTicket
+	return shareTicketWith(ctx, t.pageOut(), kind, ticket, copyOn, show, t.copyTicket)
+}
+
+func (t *Console) copyTicket(ctx context.Context, out io.Writer, ticket grant.Ticket) (string, error) {
+	if t.copyToClipboard != nil {
+		return t.copyToClipboard(ctx, out, ticket)
 	}
-	return shareTicketWith(ctx, t.pageOut(), kind, ticket, copyOn, show, copy)
+	return copyTicket(ctx, out, ticket)
 }
 
 func shareTicketWith(ctx context.Context, out io.Writer, kind string, ticket grant.Ticket, copyOn, show bool, copy func(context.Context, io.Writer, grant.Ticket) (string, error)) error {

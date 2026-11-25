@@ -97,17 +97,16 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 				if err != nil {
 					return err
 				}
-				if !t.terminalUI() {
-					t.describeOffer(st, offer)
-				}
-				if err = t.shareTicket(ctx, "邀请", offer, t.autoCopy, !t.interactive); err != nil {
-					return err
-				}
 				if t.terminalUI() {
+					t.showHostGuide(ctx, st, offer, t.autoCopy)
+				} else {
 					t.describeOffer(st, offer)
+					if err = t.shareTicket(ctx, "邀请", offer, t.autoCopy, true); err != nil {
+						return err
+					}
+					t.line("将邀请私发给对方，再粘贴回执或输入文件路径。")
+					fmt.Fprint(t.out, hostPrompt)
 				}
-				t.line("将邀请私发给对方，再粘贴回执或输入文件路径。")
-				t.writeHostPrompt(false)
 			case "connecting":
 				t.line("已批准本次连接。正在检查 UDP 和 TCP 直连路径。")
 				if st.Note != "" {
@@ -175,7 +174,13 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 				}
 				return item.err
 			}
-			switch strings.ToLower(item.text) {
+			cmd := strings.ToLower(item.text)
+			guide := t.terminalUI() && st.Phase == "waiting" && pending == nil
+			if guide && cmd == "d" {
+				t.showHostDetails(st, offer)
+				continue
+			}
+			switch cmd {
 			case "b", "/back":
 				if !t.fullScreen {
 					fmt.Fprintln(t.out, "授权继续有效。输入 /status 查看状态，/revoke 撤销。")
@@ -188,10 +193,19 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 				t.notice("32", "✓", "本次授权已撤销。")
 				return nil
 			case "v", "c":
-				if st.Phase == "waiting" {
-					if err := t.shareTicket(ctx, "邀请", offer, strings.EqualFold(item.text, "c"), strings.EqualFold(item.text, "v")); err != nil {
-						return err
-					}
+				if st.Phase != "waiting" {
+					break
+				}
+				if guide && cmd == "c" {
+					t.showHostGuide(ctx, st, offer, true)
+					continue
+				}
+				if err := t.shareTicket(ctx, "邀请", offer, cmd == "c", cmd == "v"); err != nil {
+					return err
+				}
+				if guide {
+					t.hostDetailsPrompt()
+					continue
 				}
 			default:
 				if st.Phase != "waiting" {
@@ -282,9 +296,17 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 	}
 	if pending == nil {
 		if t.terminalUI() {
-			t.describeOffer(st, offer)
+			t.setActivity(waitLabel(st))
+			fmt.Fprint(t.pageOut(), t.view().hostGuide(st, ""))
+		} else {
+			fmt.Fprint(t.out, hostPrompt)
 		}
-		t.writeHostPrompt(false)
+		return
+	}
+	t.setActivity("回执已核验 · 等待本机批准")
+	v := t.view()
+	if t.terminalUI() && (v.height < 18 || v.width < 32) {
+		t.showCompactHostApproval(v, offer, *pending)
 		return
 	}
 	showSessionIdentity(t.pageOut(), "请求控制的设备", pending.Claims.Issuer, pending.Claims.DeviceName)
@@ -298,24 +320,12 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		fmt.Fprintln(t.out, "登录后，对方可以按该账号已有的 sudo 规则执行管理员命令。")
 	}
-	t.writeHostPrompt(true)
-}
-
-func (t *Console) writeHostPrompt(approval bool) {
 	if !t.terminalUI() {
-		if approval {
-			fmt.Fprint(t.out, "y 批准本次连接，r 重选回执，q 撤销 > ")
-		} else {
-			fmt.Fprint(t.out, hostPrompt)
-		}
+		fmt.Fprint(t.out, "y 批准本次连接，r 重选回执，q 撤销 > ")
 		return
 	}
-	v := t.view()
-	label, keys := "输入回执", "b 返回  q 撤销  p 读取  c 复制  v 显示"
-	if approval {
-		label, keys = "y 批准本次连接", "r 重选回执  q 撤销"
-	}
-	fmt.Fprint(t.pageOut(), v.composer(label, v.muted(keys)))
+	fmt.Fprint(t.pageOut(), v.hostKeys("y 批准本次连接", "r 重选回执", "q 撤销本次授权"))
+	fmt.Fprint(t.out, v.composer("核对设备后输入选择", "按回车确认"))
 }
 
 // The two reserved rows leave the cursor and any partially typed duration in place.

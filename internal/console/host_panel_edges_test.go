@@ -53,7 +53,7 @@ func TestHostPanelMissingOfferAndDisplayErrorsAreActionable(t *testing.T) {
 	cause := errors.New("fixture terminal cannot write ticket")
 	for _, interactive := range []bool{false, true} {
 		out := &receiptTextWriter{err: cause}
-		c := &Console{out: out, in: hostPanelInput(t, "v\n"), interactive: interactive}
+		c := &Console{out: out, in: hostPanelInput(t, "d\nv\n"), interactive: interactive}
 		if err := c.hostPanel(t.Context(), state, nil, nil, hostPanelServices{}); !errors.Is(err, cause) {
 			t.Fatalf("interactive=%t: lost output failure: %v", interactive, err)
 		}
