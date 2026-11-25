@@ -67,23 +67,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 packaging/draft_rpms.py upload "$TAG" "$RUNNER_TEMP/rpm-work"
 
-  verify-arm:
+  verify-draft:
     needs: sign
-    runs-on: ubuntu-24.04-arm
     permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Retrieve signed RPMs from the draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "$TAG" --dir "$RUNNER_TEMP/rpms" --pattern 'peertty.*.rpm' --pattern peertty-rpm.asc
-          cmp packaging/keys/peertty-rpm.asc "$RUNNER_TEMP/rpms/peertty-rpm.asc"
-      - name: Install the signed aarch64 RPM in Fedora
-        run: |
-          docker pull fedora:45
-          docker run --rm --network none -v "$RUNNER_TEMP/rpms:/packages:ro" -v "$GITHUB_WORKSPACE/packaging:/verify:ro" fedora:45 \
-            sh /verify/check-signed-rpms.sh /packages "${TAG#v}" /verify/keys/peertty-rpm.asc
+      contents: write # GitHub requires push access for draft visibility.
+    uses: ./.github/workflows/verify-draft-rpms.yml
+    with:
+      tag: ${{ inputs.tag }}

@@ -1,0 +1,44 @@
+name: Verify draft RPMs
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed draft release tag
+        required: true
+        type: string
+permissions: {}
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write # Draft releases are only visible to users with push access.
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download RPMs from the existing draft
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(gh release view "$TAG" --json isDraft,tagName --jq 'select(.isDraft) | .tagName')" = "$TAG"
+          gh release download "$TAG" --dir "$RUNNER_TEMP/rpms" --pattern 'peertty.*.rpm' --pattern peertty-rpm.asc
+          cmp packaging/keys/peertty-rpm.asc "$RUNNER_TEMP/rpms/peertty-rpm.asc"
+      - name: Verify both signatures and install the native RPM in Fedora
+        run: |
+          docker pull fedora:45
+          docker run --rm --network none -v "$RUNNER_TEMP/rpms:/packages:ro" -v "$GITHUB_WORKSPACE/packaging:/verify:ro" fedora:45 \
+            sh /verify/check-signed-rpms.sh /packages "${TAG#v}" /verify/keys/peertty-rpm.asc
