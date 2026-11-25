@@ -80,7 +80,7 @@ func TestSingleUseReceiptStopsReadingBeforeSSH(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil || !strings.Contains(out.String(), "控制会话已连接") {
+	if err != nil || !strings.Contains(out.String(), "直连已建立，正在登录 SSH") {
 		t.Fatal(err, out.String())
 	}
 }
@@ -126,7 +126,7 @@ func TestSingleUseReceiptCancelsWhenParentEnds(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	if !errors.Is(err, context.Canceled) || strings.Contains(out.String(), "控制会话已连接") || c.activity != "" {
+	if !errors.Is(err, context.Canceled) || strings.Contains(out.String(), "直连已建立") || c.activity != "" {
 		t.Fatalf("canceled receipt: %v, %q", err, out.String())
 	}
 	select {
@@ -143,7 +143,7 @@ func TestSingleUseReceiptReportsPublicationFailureWithoutReadiness(t *testing.T)
 	err := c.singleUseReceipt(t.Context(), st, true, func(_ context.Context, publish func(grant.Ticket) error, _ func(string)) error {
 		return publish(grant.Ticket{Claims: grant.Claims{Kind: "answer"}})
 	})
-	if err == nil || strings.Contains(out.String(), "控制会话已连接") || strings.Contains(out.String(), ticketBegin) {
+	if err == nil || strings.Contains(out.String(), "直连已建立") || strings.Contains(out.String(), ticketBegin) {
 		t.Fatalf("failed write was announced as ready: %v, %q", err, out.String())
 	}
 }

@@ -18,6 +18,8 @@ peertty
 
 ## 获取安装包
 
+使用有仓库访问权的账号打开 Releases，下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[PeerTTY Releases](https://github.com/chiway-luo/PeerTTY/releases)
+
 在仓库 Actions 中打开 **Check native installers**。成功完成构建的运行会在 **Artifacts** 中提供 `installers` 下载。解压后按平台手册安装或升级。[安装包构建记录](https://github.com/chiway-luo/PeerTTY/actions/workflows/installers.yml)
 
 | 平台 | 安装包 | 操作说明 |

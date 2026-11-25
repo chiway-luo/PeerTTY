@@ -19,6 +19,14 @@ import (
 
 const pathLifetime = 10 * time.Second
 
+// Limit extra startup traffic to at most 48 KB per side before framing;
+// bulk traffic uses ordinary SCTP retransmission.
+const (
+	startupCopyLimit   = 32
+	startupDatagramMax = 1500
+	startupCopyWindow  = 20 * time.Second
+)
+
 type routeChallenge struct {
 	token        [16]byte
 	issued, sent time.Time
@@ -46,6 +54,9 @@ type roaming struct {
 	started       time.Time
 	initialChecks map[wirePath]time.Time
 	nominated     bool
+	startupAt     time.Time
+	startupCopies int
+	startupDone   atomic.Bool
 }
 
 func newRoaming(ctx context.Context) (*roaming, error) {
@@ -93,6 +104,26 @@ func (r *roaming) enable(receiptSignature []byte, connected func() bool) error {
 	return nil
 }
 
+// reserveStartupCopy is shared by the original and migrated egress paths.
+// Only DTLS on a nominated ICE pair and bound authorization may use it.
+func (r *roaming) reserveStartupCopy(data []byte, now time.Time) bool {
+	if r.startupDone.Load() || r.keys.Load() == nil || r.ctx.Err() != nil || len(data) < 13 || len(data) > startupDatagramMax ||
+		data[1] != 0xfe || (data[0] != 20 && data[0] != 22 && data[0] != 23) {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.startupAt.IsZero() {
+		r.startupAt = now
+	}
+	if now.Sub(r.startupAt) >= startupCopyWindow || r.startupCopies >= startupCopyLimit {
+		r.startupDone.Store(true)
+		return false
+	}
+	r.startupCopies++
+	return true
+}
+
 func (r *roaming) write(pair wirePath, data []byte) (bool, error) {
 	keys := r.keys.Load()
 	if keys == nil || len(data) == 0 {
@@ -128,7 +159,13 @@ func (r *roaming) write(pair wirePath, data []byte) (bool, error) {
 	}
 	// UDP transmission errors during an interface change are transient. Keep
 	// ICE/SCTP alive to retransmit over the next validated path.
-	err := path.send(keys, pathData, data)
+	var err error
+	if r.reserveStartupCopy(data, time.Now()) {
+		wire := keys.seal(pathData, data)
+		_, err = writeStartupDatagram(path.socket.UDPConn, wire, net.UDPAddrFromAddrPort(path.addr), true)
+	} else {
+		err = path.send(keys, pathData, data)
+	}
 	if routeUnavailable(err) || errors.Is(err, net.ErrClosed) {
 		return true, nil
 	}

@@ -9,13 +9,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"peertty/internal/identitystate"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 )
 
 func TestEstablishedGrantBoundsConsecutiveRouteLoss(t *testing.T) {
@@ -92,6 +93,9 @@ func TestProlongedOutageUpdatesAndClearsNotice(t *testing.T) {
 
 func TestCachedLocalTLSAndLastError(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	keyPath := filepath.Join(dir, "device.key")
 	writeTestIPCKey(t, keyPath)
 	c1, err := cachedLocalTLS(keyPath)
@@ -407,8 +411,15 @@ func exerciseSharedPeer(t *testing.T, ttl time.Duration) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		if now := time.Now(); now.Before(offer.Deadline()) && now.Before(earliestHostDeadline) {
-			t.Fatal("active grant ended before its deadline")
+		// The signed ticket is serialized to milliseconds; Windows' suspend-aware
+		// boot counter also advances in coarse ticks. Compare the externally
+		// observed shutdown to the clock's resolution, not to a sub-tick wall time.
+		tolerance := time.Millisecond
+		if runtime.GOOS == "windows" {
+			tolerance = 20 * time.Millisecond
+		}
+		if now := time.Now(); now.Add(tolerance).Before(offer.Deadline()) && now.Add(tolerance).Before(earliestHostDeadline) {
+			t.Fatalf("active grant ended early (signed deadline in %s, launch floor in %s)", offer.Deadline().Sub(now), earliestHostDeadline.Sub(now))
 		}
 	} else if err = Revoke(ctx, host, a.ID); err != nil {
 		t.Fatal(err)

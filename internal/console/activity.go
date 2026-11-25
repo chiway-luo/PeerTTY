@@ -11,6 +11,7 @@ import (
 
 const spinFrames = "|/-\\"
 const spinInterval = 200 * time.Millisecond
+const waitForApprovalAndRoute = "等待被控方批准并建立直连"
 
 func waitLabel(s active.State) string {
 	switch s.Phase {
@@ -20,7 +21,7 @@ func waitLabel(s active.State) string {
 		if s.Role == "host" {
 			return "等待控制端回执"
 		}
-		return "等待被控方批准"
+		return waitForApprovalAndRoute
 	case "connecting":
 		return "正在建立直连"
 	case "disconnected":

@@ -35,7 +35,7 @@ func (t *Console) drawReceipt(ctx context.Context, st active.State, answer grant
 
 func (t *Console) receiptPrompt(st active.State) {
 	v := t.view()
-	label := "等待被控方批准"
+	label := waitForApprovalAndRoute
 	hint := "回车复制回执，或输入快捷键后回车"
 	if st.Phase == "ready" {
 		label = "已连接 · 回车打开 SSH 终端"
@@ -112,7 +112,7 @@ func (t *Console) receiptPanel(ctx context.Context, st active.State, text, revie
 		if !review && st.Phase == "ready" {
 			t.setActivity("")
 			t.clearPage()
-			t.notice("32", "●", "控制会话已连接 · "+st.Route)
+			t.notice("32", "●", "直连已建立 · "+st.Route)
 			if err := services.link(ctx, st); err != nil {
 				return fmt.Errorf("SSH 连接结束: %w", err)
 			}
@@ -140,7 +140,7 @@ func (t *Console) receiptPanel(ctx context.Context, st active.State, text, revie
 				if readKeys {
 					t.receiptPrompt(st)
 				} else {
-					t.line("等待被控方批准。可在另一个菜单输入 /receipt 再次复制回执。")
+					t.line(waitForApprovalAndRoute + "。可在另一个菜单输入 /receipt 再次复制回执。")
 				}
 			case st.Phase == "disconnected":
 				return reconnectingGrant{id: st.ID}

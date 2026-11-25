@@ -19,6 +19,9 @@ func TestIdentityLayoutAndLegacyImport(t *testing.T) {
 		t.Fatalf("lost installed settings path: %s", got)
 	}
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	key := filepath.Join(dir, "device.key")
 	dst := Path(key, name)
 	if dst == Path(filepath.Join(dir, "second.key"), name) || dst == filepath.Join(dir, name) {
@@ -153,6 +156,9 @@ func TestMissingOrNonregularStateDoesNotCallEditor(t *testing.T) {
 
 func TestImportLegacyKeepsStateCreatedDuringRecognition(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	key := filepath.Join(dir, "custom.key")
 	const name = "settings.json"
 	legacy := filepath.Join(dir, name)

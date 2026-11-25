@@ -37,7 +37,7 @@ func NewLoginKey(path string) (ed25519.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := createLoginKeyFile(path)
 	if err != nil {
 		return nil, err
 	}

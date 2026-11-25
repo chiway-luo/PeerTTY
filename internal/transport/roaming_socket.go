@@ -115,9 +115,19 @@ func (s *roamSocket) WriteTo(data []byte, dest net.Addr) (int, error) {
 			return len(data), nil
 		}
 	}
-	n, err := s.UDPConn.WriteTo(data, dest)
+	n, err := writeStartupDatagram(s.UDPConn, data, dest, s.owner.reserveStartupCopy(data, time.Now()))
 	if s.owner.keys.Load() != nil && routeUnavailable(err) {
 		return len(data), nil
+	}
+	return n, err
+}
+
+// A best-effort startup copy goes to the same ICE-selected peer. Reuse the
+// identical wire bytes so the receiving replay filters discard the duplicate.
+func writeStartupDatagram(conn transport.UDPConn, data []byte, dest net.Addr, repeat bool) (int, error) {
+	n, err := conn.WriteTo(data, dest)
+	if err == nil && n == len(data) && repeat {
+		_, _ = conn.WriteTo(data, dest)
 	}
 	return n, err
 }

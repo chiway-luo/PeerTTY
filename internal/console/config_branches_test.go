@@ -67,6 +67,9 @@ func TestLegacySettingsImportDoesNotAdoptUnknownOrEmptyConfiguration(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+			if err := os.Chmod(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
 			key := filepath.Join(dir, "key")
 			legacy := filepath.Join(dir, "settings.json")
 			putSettingsFixture(t, legacy, tc.raw)

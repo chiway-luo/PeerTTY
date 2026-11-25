@@ -626,7 +626,7 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 print(f"{outcome}: {detail}; no direct channel, port 22 remained closed")
                 return
             host_route = device.expect(r"被控会话已连接 · ([^\r\n]+)\r?\n", 75)[1]
-            route = control.expect(r"控制会话已连接 · ([^\r\n]+)\r?\n", 65)[1]
+            route = control.expect(r"(?:控制会话已连接|直连已建立) · ([^\r\n]+)\r?\n", 65)[1]
             if expected_protocol:
                 for selected in (route, host_route):
                     if not re.fullmatch(expected_protocol + r" (host|srflx|prflx)/(host|srflx|prflx)", selected):
@@ -636,6 +636,11 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
                 print(f"selected operator={route}, target={host_route}", flush=True)
             if nat:
                 for selected in (host_route, route):
+                    # Under loss an already authenticated path can migrate before
+                    # the menu first observes readiness. Explicit ICE-pair checks
+                    # above remain strict when a protocol is requested.
+                    if selected == "udp · 换网直连":
+                        continue
                     if not re.fullmatch(r"udp (host|srflx|prflx)/(srflx|prflx)", selected):
                         raise RuntimeError(f"expected a translated UDP destination, selected {selected}")
                 print(f"private endpoints {LAN[operator]} -> {LAN[target]}; selected {route} and {host_route}")

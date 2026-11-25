@@ -180,7 +180,7 @@ func TestLinkExitPreservesGrantAndOpenSSHStatus(t *testing.T) {
 		{name: "replaced grant", startErr: original, phase: "ready", id: "replacement", want: "本次授权已结束"},
 		{name: "same grant reconnecting", startErr: original, phase: "disconnected", id: "selected", reconnecting: true},
 		{name: "offline reason retained", startErr: original, phase: "offline", id: "selected", note: "fixture backend ended", want: "fixture backend ended"},
-		{name: "same grant ready after transport interruption", startErr: exit255, phase: "ready", id: "selected", want: "输入 /link 再次连接本次授权的设备"},
+		{name: "same grant ready after transport interruption", startErr: exit255, phase: "ready", id: "selected", want: "直连仍可用，但 SSH 登录未完成或终端已断开"},
 		{name: "non transport error", startErr: original, phase: "ready", id: "selected"},
 		{name: "temporary status unavailable", startErr: exit255, statusErr: io.ErrUnexpectedEOF},
 		{name: "no stable status to report", startErr: original, phase: "connecting", id: "selected"},
@@ -217,5 +217,25 @@ func TestReadyInteractiveLinkHonorsCancellationWithoutReclassifyingExit(t *testi
 	s := active.State{ID: "selected", Role: "control", Phase: "ready", User: "test", Alias: "fixture"}
 	if err := tui.linkSSH(ctx, s); !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "授权已结束") {
 		t.Fatalf("cancellation was reclassified: %v", err)
+	}
+}
+
+func TestReadyInteractiveLinkShowsSSHLoginBeforeNativeOutput(t *testing.T) {
+	isolatedSSHClient(t, "printf 'native SSH output\\n'")
+	in, err := os.CreateTemp(t.TempDir(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	var out bytes.Buffer
+	tui := Console{in: in, out: &out, fullScreen: true, Settings: Settings{KeyPath: filepath.Join(t.TempDir(), "device.key")}}
+	s := active.State{ID: "selected", Role: "control", Phase: "ready", User: "test", Alias: "fixture"}
+	if err := tui.linkSSH(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	visible := out.String()
+	notice, sshOutput := strings.Index(visible, leaveScreen+erasePage+sshLoginNotice), strings.Index(visible, "native SSH output")
+	if notice < 0 || sshOutput <= notice {
+		t.Fatalf("SSH login notice is not visible before native output: %q", visible)
 	}
 }

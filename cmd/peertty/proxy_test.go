@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +22,7 @@ import (
 	"peertty/internal/grant"
 	"peertty/internal/localssh"
 	"peertty/internal/session"
+	"peertty/internal/transport"
 )
 
 // OpenSSH starts this test binary as its real ProxyCommand subprocess.
@@ -36,6 +37,41 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// Win32 OpenSSH 9.5 may leave a native stdout pipe open even when a
+// direct (non-proxied) SSH command has finished. Use real files on Windows
+// so these integration tests exercise the protocol and exit statuses.
+func captureSSHTestOutput(t *testing.T, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		var diag bytes.Buffer
+		cmd.Stderr = &diag
+		out, e := cmd.Output()
+		return out, diag.Bytes(), e
+	}
+	dir := t.TempDir()
+	out, e := os.Create(filepath.Join(dir, "stdout"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer out.Close()
+	diag, e := os.Create(filepath.Join(dir, "stderr"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer diag.Close()
+	cmd.Stdout, cmd.Stderr = out, diag
+	err = cmd.Run()
+	stdout, e = os.ReadFile(out.Name())
+	if e != nil {
+		t.Fatal(e)
+	}
+	stderr, e = os.ReadFile(diag.Name())
+	if e != nil {
+		t.Fatal(e)
+	}
+	return stdout, stderr, err
+}
+
 func TestNativeSSHProxyExit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("needs native SSH and a peer connection")
@@ -45,11 +81,7 @@ func TestNativeSSHProxyExit(t *testing.T) {
 		t.Skip("native OpenSSH client unavailable")
 	}
 	dir := t.TempDir()
-	loginKey, login, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	private, err := ssh.MarshalPrivateKey(login, "fixture")
+	loginKey, err := localssh.NewLoginKey(filepath.Join(dir, "login.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +91,6 @@ func TestNativeSSHProxyExit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("login.key", pem.EncodeToMemory(private))
 	write("ssh.conf", nil)
 	authorized, err := ssh.NewPublicKey(loginKey)
 	if err != nil {
@@ -147,17 +178,10 @@ func TestNativeSSHProxyExit(t *testing.T) {
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PEERTTY_TEST_PROXY=1")
 	cmd.WaitDelay = 3 * time.Second
-	out, err := cmd.CombinedOutput()
+	output, diag, err := captureSSHTestOutput(t, cmd)
+	out := append(output, diag...)
 	if err != nil || !bytes.Contains(out, []byte("PEERTTY_PTY_OK")) {
 		t.Fatalf("native SSH: %v\n%s", err, out)
-	}
-	select {
-	case err := <-finished:
-		if err != nil {
-			t.Fatalf("host after SSH exit: %v\n%s", err, out)
-		}
-	case <-ctx.Done():
-		t.Fatal("host outlived SSH", ctx.Err())
 	}
 	select {
 	case err := <-server:
@@ -166,6 +190,17 @@ func TestNativeSSHProxyExit(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+	select {
+	case err := <-finished:
+		// The native Win32 client can terminate its ProxyCommand after a
+		// successful SSH exit, before PeerTTY's bridge exchanges a final ACK.
+		// The SSH result and fixture shutdown above must still both succeed.
+		if err != nil && !(runtime.GOOS == "windows" && errors.Is(err, transport.ErrDirectDisconnected)) {
+			t.Fatalf("host after SSH exit: %v\n%s", err, out)
+		}
+	case <-ctx.Done():
+		t.Fatal("host outlived SSH", ctx.Err())
 	}
 }
 
@@ -337,13 +372,12 @@ func TestLinkCommandStdoutAndExitCode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := make(chan error, 1)
 			go func() { fixture <- serveMarker(l, cfg) }()
-			var diag bytes.Buffer
 			args := append([]string{"link", "-key", client}, tc.args...)
 			cmd := exec.CommandContext(ctx, bin, args...)
-			cmd.Stderr = &diag
-			output, err := cmd.Output()
+			cmd.WaitDelay = 3 * time.Second // Bound inherited output pipes on cancellation.
+			output, diag, err := captureSSHTestOutput(t, cmd)
 			if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != tc.code || strings.TrimSpace(string(output)) != "PEERTTY_PTY_OK" {
-				t.Fatalf("exit=%v stdout=%q stderr=%q", err, output, diag.String())
+				t.Fatalf("exit=%v stdout=%q stderr=%q", err, output, diag)
 			}
 			select {
 			case err := <-fixture:

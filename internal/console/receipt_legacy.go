@@ -65,7 +65,8 @@ func (t *Console) singleUseReceipt(parent context.Context, st active.State, text
 			}
 		case route := <-routes:
 			stopPanel()
-			fmt.Fprintln(t.out, "控制会话已连接 ·", route)
+			fmt.Fprintln(t.out, "直连已建立 ·", route)
+			fmt.Fprintln(t.out, sshLoginNotice)
 			close(resume)
 			return <-done
 		case <-tick.C:

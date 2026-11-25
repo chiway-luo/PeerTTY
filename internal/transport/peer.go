@@ -23,6 +23,9 @@ import (
 const label = "peertty.ssh.v1"
 const linkLabel = "peertty.ssh.link.v1"
 
+// ErrDirectDisconnected indicates that an established direct peer was lost.
+var ErrDirectDisconnected = errors.New("direct connection disconnected")
+
 type opened struct {
 	channel datachannel.ReadWriteCloserDeadliner
 	err     error
@@ -107,6 +110,10 @@ func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) 
 		// it. A handover between DTLS and the first terminal then has no separate
 		// on-wire SCTP startup retry budget.
 		settings.EnableSctpSnap(true)
+		// Interactive streams can wait for a lone lost packet, with no later
+		// packets to trigger fast retransmit. Bound exponential backoff
+		// without changing reliability, ordering, or congestion control.
+		settings.SetSCTPRTOMax(4 * time.Second)
 	}
 	settings.DetachDataChannels()
 	settings.EnableDataChannelBlockWrite(true)
@@ -153,7 +160,10 @@ func reportConnectionState(mode peerMode, state webrtc.PeerConnectionState, stop
 		return
 	}
 	switch state {
-	case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+	case webrtc.PeerConnectionStateDisconnected:
+		stopRefresh()
+		cancel(ErrDirectDisconnected)
+	case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 		stopRefresh()
 		cancel(fmt.Errorf("direct connection %s", state))
 	}

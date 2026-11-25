@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,11 +39,23 @@ func openWorkerLog(keyPath string) *os.File {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	// The grant lease permits one writer. Seek to append instead of opening
+	// append-only: Windows cannot truncate an append-only file handle.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil
 	}
-	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() || (info.Size() > maxWorkerLogSize && f.Truncate(0) != nil) {
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		return nil
+	}
+	if info.Size() > maxWorkerLogSize {
+		err = f.Truncate(0)
+	} else {
+		_, err = f.Seek(0, io.SeekEnd)
+	}
+	if err != nil {
 		f.Close()
 		return nil
 	}

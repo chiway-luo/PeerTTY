@@ -36,6 +36,8 @@ func IdentityPath(stateDir, key string) (string, error) {
 
 var roleNames = map[string]string{"host": "被控端", "control": "控制端"}
 
+const sshLoginNotice = "直连已建立，正在登录 SSH…"
+
 const reconnectNotice = "网络连接已断开，正在重连…"
 const reconnectRevokeHint = "如需立即结束授权，可在另一个终端运行 peertty revoke（使用相同的设备身份）。"
 
@@ -139,7 +141,12 @@ func Link(ctx context.Context, key string, in *os.File, out, diag io.Writer, com
 	if err != nil {
 		return err
 	}
-	return linkSSH(ctx, key, s, in, out, diag, command, (*exec.Cmd).Run)
+	return linkSSH(ctx, key, s, in, out, diag, command, func(cmd *exec.Cmd) error {
+		if len(command.Args) == 0 || command.TTY {
+			fmt.Fprintln(diag, sshLoginNotice)
+		}
+		return cmd.Run()
+	})
 }
 
 func (t *Console) linkSSH(ctx context.Context, s active.State) error {
@@ -147,7 +154,11 @@ func (t *Console) linkSSH(ctx context.Context, s active.State) error {
 		return reconnectingGrant{id: s.ID}
 	}
 	err := linkSSH(ctx, t.KeyPath, s, t.in, t.out, t.out, RemoteCommand{}, func(cmd *exec.Cmd) error {
-		return t.nativeSSH(cmd.Run)
+		return t.nativeSSH(func() error {
+			// Print in the native screen: the receipt view may use an alternate buffer.
+			fmt.Fprintln(t.out, sshLoginNotice)
+			return cmd.Run()
+		})
 	})
 	if err != nil && ctx.Err() == nil {
 		fresh, statusErr := active.Status(ctx, t.KeyPath)
@@ -168,7 +179,7 @@ func describeLinkExit(id string, err error, fresh active.State, statusErr error)
 	case statusErr == nil && fresh.Phase == "ready":
 		var exit *exec.ExitError
 		if errors.As(err, &exit) && exit.ExitCode() == 255 {
-			return fmt.Errorf("SSH 连接中断或未能建立。输入 /link 再次连接本次授权的设备 · %w", err)
+			return fmt.Errorf("直连仍可用，但 SSH 登录未完成或终端已断开。可输入 /link 用本次授权重试；退出菜单可查看 SSH 原始提示 · %w", err)
 		}
 	}
 	return err

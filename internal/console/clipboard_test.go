@@ -63,7 +63,7 @@ func TestClipboardCommandFailuresDoNotUseSystemClipboard(t *testing.T) {
 			t.Fatal("read requested write command")
 		}
 		return exec.CommandContext(ctx, missing), nil
-	}); !errors.Is(err, os.ErrNotExist) {
+	}); !errors.Is(err, os.ErrNotExist) && !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("unlaunchable read command: %v", err)
 	}
 }

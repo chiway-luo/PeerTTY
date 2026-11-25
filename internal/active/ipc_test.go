@@ -403,6 +403,9 @@ func TestStatusReportsCanceledDialWithoutAnActiveGrant(t *testing.T) {
 
 func TestCachedLocalTLSBoundsEntriesAndRetainsMatchingIdentity(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 33; i++ {
 		key := filepath.Join(dir, fmt.Sprintf("fixture-%d.key", i))
 		disk := writeTestIPCKey(t, key)
