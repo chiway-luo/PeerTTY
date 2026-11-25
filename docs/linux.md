@@ -11,7 +11,7 @@ sudo apt update &&
 sudo apt install peertty
 ```
 
-软件源签名公钥指纹为 `CA3D 08AE 398A 9873 A155  6DA9 0CDE C356 2B01 5AED`。
+软件源配置内嵌 APT 公钥，指纹为 `CA3D 08AE 398A 9873 A155 6DA9 0CDE C356 2B01 5AED`。安装 v0.6.4 后，`peertty --version` 显示 `PeerTTY 0.6.4`。[软件源配置](https://chiway-luo.github.io/PeerTTY/peertty.sources)
 
 ## 安装和启动
 
@@ -23,29 +23,21 @@ peertty
 
 输入 `1` 控制设备，`2` 允许被控制，`5` 单独检查本机被控条件，`0` 退出。每次配对时临时生成会话密钥，同一镜像复制的设备也能互连。
 
-取得安装包后，用系统软件管理器打开对应文件。[获取安装包](install.md#获取安装包)
+手动安装 DEB 时，从 Release 下载对应架构的软件包，在下载目录运行 `sudo apt install "./peertty_$(dpkg --print-architecture).deb"`。[获取安装包](install.md#获取安装包)
 
-| 系统 | 安装包 |
-| --- | --- |
-| Debian / Ubuntu | `peertty_amd64.deb` · `peertty_arm64.deb` |
-| Fedora / RHEL | `peertty.x86_64.rpm` · `peertty.aarch64.rpm` |
+### 验签并安装 RPM
 
-<details>
-<summary>无桌面的服务器或其他发行版如何安装</summary>
-
-在下载目录安装。Debian / Ubuntu 使用 `sudo apt install "./peertty_$(dpkg --print-architecture).deb"`。
-
-Fedora / RHEL 从同版 Release 下载 RPM 和 `peertty-rpm.asc`。首次安装时运行 `gpg --show-keys --with-fingerprint ./peertty-rpm.asc`，核对发行主钥指纹 **EF6D 3246 97FD 1C2C 5DFA F8DB 1F00 A1E4 EE0C 0DC5**，然后导入公钥、验签并安装。[仓库中的发行公钥](../packaging/keys/peertty-rpm.asc)
+Fedora / RHEL 用户运行 `uname -m` 确认架构，下载对应的 `peertty.x86_64.rpm` 或 `peertty.aarch64.rpm`，再下载同版 `peertty-rpm.asc`。首次安装时，在下载目录运行 `gpg --show-keys --with-fingerprint ./peertty-rpm.asc`，核对发行主钥指纹 **EF6D 3246 97FD 1C2C 5DFA F8DB 1F00 A1E4 EE0C 0DC5**，然后执行以下命令。[最新版安装包和公钥](https://github.com/chiway-luo/PeerTTY/releases/latest)
 
 ```sh
 sudo rpmkeys --import ./peertty-rpm.asc
 rpmkeys --define '_pkgverify_level all' --checksig "./peertty.$(uname -m).rpm"
-sudo dnf install "./peertty.$(uname -m).rpm"
+sudo dnf --setopt=localpkg_gpgcheck=1 install "./peertty.$(uname -m).rpm"
 ```
 
-其他 64 位发行版可取单文件程序。x86-64 运行 `sudo install -m 0755 peertty-linux-amd64 /usr/local/bin/peertty`，ARM64 将文件名改为 `peertty-linux-arm64`。[构建单文件程序](install.md#构建安装包)
+### 使用单文件程序
 
-</details>
+其他 64 位发行版可取单文件程序。x86-64 运行 `sudo install -m 0755 peertty-linux-amd64 /usr/local/bin/peertty`，ARM64 将文件名改为 `peertty-linux-arm64`。[构建单文件程序](install.md#构建安装包)
 
 ## 用 Linux 控制另一台设备
 
@@ -73,6 +65,14 @@ sudo dnf install "./peertty.$(uname -m).rpm"
 
 ## 升级和卸载
 
-先用 `peertty revoke` 结束活动授权并退出菜单。使用 APT 软件源时运行 `sudo apt update && sudo apt install --only-upgrade peertty`。使用本地安装包时，在新版安装包目录重新执行对应的安装命令，再用 `peertty --version` 核对版本。卸载时，Debian / Ubuntu 运行 `sudo apt remove peertty`，Fedora / RHEL 运行 `sudo dnf remove peertty`。双方升级到兼容版本后发起新授权。
+升级前用 `peertty revoke` 结束活动授权并退出菜单。已添加 APT 软件源的设备运行以下命令。
+
+```sh
+sudo apt update &&
+sudo apt install --only-upgrade peertty &&
+peertty --version
+```
+
+使用本地安装包时，在新版安装包目录重新执行对应的安装命令。双方升级后发起新授权。卸载时，Debian / Ubuntu 运行 `sudo apt remove peertty`，Fedora / RHEL 运行 `sudo dnf remove peertty`。
 
 单文件安装沿用相同的 `install` 命令覆盖程序，卸载时运行 `sudo rm /usr/local/bin/peertty`。

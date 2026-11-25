@@ -18,7 +18,7 @@ peertty
 
 ## 获取安装包
 
-打开 Releases，下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[PeerTTY Releases](https://github.com/chiway-luo/PeerTTY/releases)
+Debian / Ubuntu 可直接添加签名 APT 软件源。手动安装时，从 Release 下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[最新版安装包](https://github.com/chiway-luo/PeerTTY/releases/latest) · [安装与升级入口](https://chiway-luo.github.io/PeerTTY/)
 
 仓库 Actions 中的 **Check native installers** 提供安装与升级回归使用的构建产物。Fedora / RHEL 用户从正式 Release 下载带发行签名的 RPM 和 `peertty-rpm.asc`。[安装包构建记录](https://github.com/chiway-luo/PeerTTY/actions/workflows/installers.yml)
 
@@ -26,7 +26,8 @@ peertty
 | --- | --- | --- |
 | macOS | `PeerTTY-macOS.pkg`，Apple 芯片和 Intel 通用 | [系统安装或仅为当前用户安装](macos.md#安装和启动) |
 | Windows | x64 或 ARM64 的 `.msi` | [安装与启动](windows.md#安装和启动) |
-| Linux | Debian / Ubuntu 用 APT 软件源或 `.deb`，Fedora / RHEL 用 `.rpm` | [通过 APT 安装](linux.md#通过-apt-安装) · [本地安装包](linux.md#安装和启动) |
+| Debian / Ubuntu | amd64 或 arm64 的 APT 软件源或 `.deb` | [通过 APT 安装](linux.md#通过-apt-安装) · [升级](linux.md#升级和卸载) |
+| Fedora / RHEL | x86_64 或 aarch64 的 `.rpm` 和发行公钥 | [验签并安装 RPM](linux.md#验签并安装-rpm) |
 
 ## 构建安装包
 
@@ -46,3 +47,23 @@ python3 packaging/build.py
 3. 工作流从标签对应的构建中取回两份 RPM，签名后核对包内容，更新草稿中的 RPM、发行公钥和 `SHA256SUMS`。Fedora 任务验证两种架构的签名，并运行安装后的程序。签名完成后由维护者决定何时公开草稿。
 
 发行认证主钥保存在维护者的本机钥匙串。轮换签名子钥时，更新仓库内的发行公钥和受保护环境中的 `RPM_SIGNING_SUBKEY`。该密钥项使用 GnuPG 的 `--export-secret-subkeys` 导出，只包含签名子钥的私有部分。安装包升级测试使用独立的临时测试密钥。[发行公钥](../packaging/keys/peertty-rpm.asc)
+
+## 同步 APT 软件源
+
+维护者在现有签名归档中使用 `reprepro` 更新 `stable/main`。将同版 Release 的两份 DEB 与 `SHA256SUMS` 核对后放入 `dist/installers/<版本>/`，解锁归档签名密钥，在项目根目录运行以下命令。
+
+```sh
+archive="$HOME/PeerTTY-apt"
+export GNUPGHOME="$archive/gnupg"
+packages="dist/installers/$(cat VERSION)"
+(
+    set -e
+    for arch in amd64 arm64; do
+        reprepro -b "$archive" --keepunreferencedfiles --export=silent-never -C main includedeb stable "$packages/peertty_${arch}.deb"
+    done
+    reprepro -b "$archive" export stable
+    reprepro -b "$archive" check stable
+)
+```
+
+将 `$archive/public/dists/` 的已签名索引和 `public/pool/` 的新版 DEB 同步至仓库的 `docs/dists/` 与 `docs/pool/`。GitHub Pages 从 `main` 的 `/docs` 部署。部署完成后运行 **Verify public APT upgrade**，填写要从哪个旧版本升级，例如 `0.6.3`。工作流会在两个架构上从公开软件源升级，并与 Release 的 SHA-256 比对。[APT 升级验证](../.github/workflows/verify-apt.yml)

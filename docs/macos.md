@@ -2,7 +2,7 @@
 
 ## 安装和启动
 
-Apple 芯片和 Intel 共用一个安装包。双击 `PeerTTY-macOS.pkg` 并按 macOS 提示授权，完成后打开“终端”。v0.6.3 发布的 PKG 尚无 Apple Developer ID Installer 签名。[获取安装包](install.md#获取安装包)
+Apple 芯片和 Intel 共用 `PeerTTY-macOS.pkg`。v0.6.4 的 PKG 尚无 Apple Developer ID Installer 签名，从正式 Release 下载并核对 SHA-256 后，双击安装，完成后打开“终端”。[获取安装包与校验和](install.md#获取安装包)
 
 ```sh
 peertty

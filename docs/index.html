@@ -23,13 +23,16 @@
 sudo install -m 0644 peertty.sources /etc/apt/sources.list.d/peertty.sources &amp;&amp;
 sudo apt update &amp;&amp;
 sudo apt install peertty</code></pre>
+    <p>已添加软件源的设备先用 <code>peertty revoke</code> 结束活动授权，再运行 <code>sudo apt update &amp;&amp; sudo apt install --only-upgrade peertty</code>。</p>
     <p><a href="peertty.sources" download>下载软件源配置</a> · <a href="https://github.com/chiway-luo/PeerTTY/blob/main/docs/linux.md">Linux 安装与升级</a></p>
+    <h2>Fedora 和 RHEL</h2>
+    <p>下载 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/peertty.x86_64.rpm">x86_64 RPM</a> 或 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/peertty.aarch64.rpm">aarch64 RPM</a> 及同版<a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/peertty-rpm.asc">发行公钥</a>。首次安装时，先<a href="https://github.com/chiway-luo/PeerTTY/blob/main/docs/linux.md#验签并安装-rpm">核对指纹并验签</a>。</p>
     <h2>Windows 和 macOS</h2>
     <ul>
       <li>Windows 安装包适用于 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-Windows-x64.msi">x64</a> 和 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-Windows-ARM64.msi">ARM64</a>。</li>
       <li><a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-macOS.pkg">macOS 通用安装包</a>适用于 Apple 芯片和 Intel。</li>
     </ul>
-    <p>安装后在新终端运行 <code>peertty</code>。<a href="https://github.com/chiway-luo/PeerTTY/releases">全部版本和校验和</a></p>
+    <p>安装后运行 <code>peertty --version</code> 核对版本，再运行 <code>peertty</code> 打开菜单。<a href="https://github.com/chiway-luo/PeerTTY/releases/tag/v0.6.4">v0.6.4 安装包、校验和及更新说明</a></p>
   </main>
 </body>
 </html>

@@ -32,7 +32,9 @@
 
 ## 首次连接
 
-两端使用 0.6.4 可自动选择 UDP 或 TCP，并防止回拨系统时钟延长授权。一端仍为 0.5.0 时使用 UDP。安装后，两端都在终端运行 `peertty`。[下载安装包](docs/install.md#获取安装包) · [macOS](docs/macos.md#安装和启动) · [Windows](docs/windows.md#安装和启动) · [Linux](docs/linux.md#安装和启动) · [从源码安装](docs/install.md#从源码安装)
+两端安装 PeerTTY 0.6.4，然后在终端运行 `peertty`。Debian / Ubuntu 可使用 APT，Fedora / RHEL 提供签名 RPM，macOS 和 Windows 提供原生安装包。[下载 v0.6.4](https://github.com/chiway-luo/PeerTTY/releases/tag/v0.6.4) · [APT 安装](docs/linux.md#通过-apt-安装) · [各平台安装指南](docs/install.md#获取安装包)
+
+两端都使用 0.6.4 时可自动选择 UDP 或 TCP，并防止回拨系统时钟延长授权。一端仍为 0.5.0 时使用 UDP。
 
 1. **被控方发邀请。** 选 `2 允许被控制`，设置授权时长（支持 `1–24` 小时或如 `30m`，默认 1 小时），把邀请私发给控制方，再通过电话或另一条已确认身份的渠道单独交付配对码。
 2. **控制方回执。** 在主菜单粘贴邀请，输入配对码并确认登录账号，把生成的回执发回同一私聊。在回执页可直接回车或输入 `c` 再复制，也可在主菜单输入 `/receipt` 重开回执页。

@@ -2,7 +2,7 @@
 
 ## 安装和启动
 
-在“设置 → 系统 → 系统信息”查看系统类型，双击对应的 MSI 安装包。安装位置为当前用户的 `%LOCALAPPDATA%\Programs\PeerTTY`。0.4.0 的 MSI 尚无发行者签名。x64 使用 `PeerTTY-Windows-x64.msi`，ARM64 使用 `PeerTTY-Windows-ARM64.msi`。[获取安装包](install.md#获取安装包)
+在“设置 → 系统 → 系统信息”查看系统类型。x64 下载 `PeerTTY-Windows-x64.msi`，ARM64 下载 `PeerTTY-Windows-ARM64.msi`。v0.6.4 的 MSI 尚无发行者签名，从正式 Release 下载并核对 SHA-256 后，双击安装到当前用户的 `%LOCALAPPDATA%\Programs\PeerTTY`。[获取安装包与校验和](install.md#获取安装包)
 
 在开始菜单搜索 **PeerTTY** 即可打开终端菜单。也可以关闭已有的 Windows Terminal 和 PowerShell 窗口，重新打开后输入以下命令。
 
