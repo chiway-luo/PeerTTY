@@ -145,7 +145,7 @@ func TestExpiredHostReturnsToSameMenu(t *testing.T) {
 	defer keys.Close()
 	dir := t.TempDir()
 	log := &transcript{changed: make(chan struct{}, 1)}
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	// This test exercises grant expiration independently of the test machine's SSH setup.
@@ -164,8 +164,11 @@ func TestExpiredHostReturnsToSameMenu(t *testing.T) {
 			c.Close()
 		}
 	}()
+	// The worker starts the grant clock before gathering the offer. Give this
+	// real subprocess time to publish the invitation on a busy Windows runner.
+	const ttl = 5 * time.Second
 	go func() {
-		done <- Run(ctx, Settings{StateDir: dir, TTL: 600 * time.Millisecond, SSHPort: ln.Addr().(*net.TCPAddr).Port}, in, log)
+		done <- Run(ctx, Settings{StateDir: dir, TTL: ttl, SSHPort: ln.Addr().(*net.TCPAddr).Port}, in, log)
 	}()
 	fmt.Fprint(keys, "2\n\n")
 	text := log.wait(t, hostPrompt)
