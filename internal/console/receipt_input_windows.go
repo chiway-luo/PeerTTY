@@ -14,6 +14,13 @@ var (
 	peekNamedPipe    = consoleDLL.NewProc("PeekNamedPipe")
 )
 
+type inputRecord struct {
+	kind, padding           uint16
+	down                    int32
+	repeat, key, scan, char uint16
+	control                 uint32
+}
+
 func (k *receiptKeys) poll(in *os.File) (string, bool, error) {
 	h := windows.Handle(in.Fd())
 	kind, err := windows.GetFileType(h)
@@ -41,12 +48,6 @@ func (k *receiptKeys) poll(in *os.File) (string, bool, error) {
 	var count uint32
 	if err := windows.GetNumberOfConsoleInputEvents(h, &count); err != nil || count == 0 {
 		return "", false, err
-	}
-	type inputRecord struct {
-		kind, padding           uint16
-		down                    int32
-		repeat, key, scan, char uint16
-		control                 uint32
 	}
 	events := make([]inputRecord, count)
 	ok, _, err := peekConsoleInput.Call(uintptr(h), uintptr(unsafe.Pointer(&events[0])), uintptr(count), uintptr(unsafe.Pointer(&count)))

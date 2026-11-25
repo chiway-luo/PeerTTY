@@ -49,11 +49,31 @@ func (t *Console) setActivity(label string) {
 func (t *Console) drawActivity() {
 	v := t.view()
 	line := fmt.Sprintf("%c %s", spinFrames[t.frame], t.activity)
-	fmt.Fprint(t.out, "\x1b7\x1b[H\x1b[2K", v.accent(ansi.Truncate(line, v.width, "")), "\x1b8")
+	t.writeTopRow(v, v.accent(line))
+}
+
+// Updating the reserved row in one write keeps the input and cursor intact.
+func (t *Console) writeTopRow(v terminalView, text string) {
+	fmt.Fprint(t.out, "\x1b7\x1b[H\x1b[2K", ansi.Truncate(text, v.width, ""), "\x1b8")
+}
+
+// Publish a grant change without moving a live Windows input line.
+func (t *Console) showEditStatus(v terminalView, st active.State, err error, notice string) {
+	if notice == "" && st.Phase == "disconnected" {
+		notice = reconnectNotice
+	}
+	label := v.grantIndicator(st, err)
+	if notice != "" {
+		label = v.ink("33", "! "+notice)
+	}
+	if t.editStatus != label && t.fullScreen && v.height > 1 {
+		t.writeTopRow(v, label)
+	}
+	t.editStatus = label
 }
 
 func (t *Console) advanceActivity() {
-	if t.activity != "" {
+	if t.activity != "" && t.editStatus == "" {
 		t.frame = (t.frame + 1) % len(spinFrames)
 		fmt.Fprintf(t.out, "\x1b7\x1b[H%c\x1b8", spinFrames[t.frame])
 	}

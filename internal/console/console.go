@@ -34,6 +34,8 @@ type Console struct {
 	in              *os.File
 	out             io.Writer
 	pending         chan line
+	lineEdit        *cookedLine
+	editStatus      string
 	pasteTTY        *os.File
 	interactive     bool
 	fullScreen      bool

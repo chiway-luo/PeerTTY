@@ -84,8 +84,21 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 	var pending *grant.Ticket
 	var input <-chan line
 	var previous active.State
+	var previousView terminalView
 	for {
-		if st.Phase != previous.Phase || ((st.Phase == "ready" || st.Phase == "disconnected" || st.Phase == "connecting") && st != previous) {
+		if st.Phase == "offline" {
+			return t.endHostPrompt(ctx, st, "", errors.New(st.Note))
+		}
+		live := st.Phase == "ready" || st.Phase == "disconnected" || st.Phase == "connecting"
+		changed := st.Phase != previous.Phase
+		var view terminalView
+		if live {
+			view = t.view()
+			changed = changed || view != previousView || st.Note != previous.Note || st.Route != previous.Route || st.Terminals != previous.Terminals
+		}
+		if changed && live && !t.lineEdit.tryLock() {
+			t.showEditStatus(view, st, nil, "")
+		} else if changed {
 			t.setActivity(waitLabel(st))
 			t.clearPage()
 			switch st.Phase {
@@ -126,14 +139,14 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 				if st.Note != "" {
 					t.line(st.Note)
 				}
-			case "offline":
-				return errors.New(st.Note)
 			}
-			if st.Phase == "connecting" || st.Phase == "ready" || st.Phase == "disconnected" {
+			if live {
 				t.liveHostPrompt()
+				previousView = view
+				t.lineEdit.unlock()
 			}
+			previous = st
 		}
-		previous = st
 		if input == nil && st.Phase != "gathering" {
 			input = t.next()
 		}
@@ -248,22 +261,41 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 }
 
 func (t *Console) handleHostEnded(ctx context.Context, st active.State, err error) error {
-	t.clearPage()
+	message := "被控会话已结束。"
 	if st.TimeLeft() <= 0 {
-		if err := active.WaitEnded(ctx, t.KeyPath, st.ID); err != nil {
-			return err
+		message = "授权已到期。"
+		err = active.WaitEnded(ctx, t.KeyPath, st.ID)
+	} else if err == nil || errors.Is(err, active.ErrInactive) {
+		err = nil
+		if reason, _, ok := active.LastError(t.KeyPath); ok {
+			err = errors.New(reason)
 		}
-		t.line("授权已到期。")
-		return nil
 	}
-	if err != nil && !errors.Is(err, active.ErrInactive) {
-		return err
+	return t.endHostPrompt(ctx, st, message, err)
+}
+
+func (t *Console) endHostPrompt(ctx context.Context, st active.State, message string, err error) error {
+	if t.pending != nil {
+		if !t.lineEdit.tryLock() {
+			// Show the result now. The main menu will reuse the pending entry.
+			notice := message
+			if err != nil {
+				notice = err.Error()
+			}
+			t.showEditStatus(t.view(), st, err, notice)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case t.lineEdit.owner <- struct{}{}:
+			}
+		}
+		defer t.lineEdit.unlock()
 	}
-	if reason, _, ok := active.LastError(t.KeyPath); ok {
-		return errors.New(reason)
+	t.clearPage()
+	if err == nil {
+		t.line(message)
 	}
-	t.line("被控会话已结束。")
-	return nil
+	return err
 }
 
 func (t *Console) describeOffer(st active.State, offer grant.Ticket) {

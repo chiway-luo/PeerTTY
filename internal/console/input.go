@@ -12,6 +12,44 @@ import (
 	"peertty/internal/grant"
 )
 
+// Windows echoes a cooked line itself, but cannot repaint it after an
+// application erases the screen. Wait for the first key before taking the
+// lock so idle prompts can refresh. Once typing begins, keep the console's
+// native editing, IME and paste behavior until this entry is submitted.
+type cookedLine struct {
+	owner      chan struct{}
+	waitForKey func() error
+}
+
+func (e *cookedLine) read(in io.Reader) (string, error) {
+	if e != nil {
+		if err := e.waitForKey(); err != nil {
+			return "", err
+		}
+		e.owner <- struct{}{}
+		defer e.unlock()
+	}
+	return readEntry(in)
+}
+
+func (e *cookedLine) tryLock() bool {
+	if e == nil {
+		return true
+	}
+	select {
+	case e.owner <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *cookedLine) unlock() {
+	if e != nil {
+		<-e.owner
+	}
+}
+
 type line struct {
 	text string
 	err  error
@@ -36,12 +74,17 @@ const (
 // reuses that read. Reading just one entry leaves SSH's stdin and tty intact.
 func (t *Console) next() <-chan line {
 	if t.pending == nil {
+		if t.lineEdit != nil && t.fullScreen && t.activity == "" {
+			// Keep the first row available for changes to the grant while the
+			// native editor owns the rest of the screen, even for a long paste.
+			fmt.Fprint(t.out, "\x1b7\x1b[2;r\x1b8")
+		}
 		if t.pasteTTY != nil {
 			io.WriteString(t.pasteTTY, "\x1b[?2004h")
 		}
 		ch := make(chan line, 1)
 		t.pending = ch
-		go func() { text, err := readEntry(t.in); ch <- line{text, err} }()
+		go func() { text, err := t.lineEdit.read(t.in); ch <- line{text, err} }()
 	}
 	return t.pending
 }
@@ -65,6 +108,9 @@ func pasteTerminal(in *os.File, out io.Writer) *os.File {
 }
 
 func (t *Console) finishEntry() {
+	if t.pending != nil && t.lineEdit != nil && t.fullScreen && t.activity == "" {
+		fmt.Fprint(t.out, "\x1b7\x1b[r\x1b8")
+	}
 	if t.pending != nil && t.pasteTTY != nil {
 		io.WriteString(t.pasteTTY, "\x1b[?2004l")
 	}

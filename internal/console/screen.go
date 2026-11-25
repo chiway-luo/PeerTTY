@@ -30,6 +30,9 @@ func (t *Console) openScreen() func() {
 		return func() {}
 	}
 	t.fullScreen = true
+	if t.in != nil {
+		t.lineEdit = nativeCookedLine(t.in)
+	}
 	fmt.Fprint(t.out, enterScreen)
 	return func() {
 		fmt.Fprint(t.out, leaveScreen)
@@ -42,6 +45,7 @@ func (t *Console) terminalUI() bool { return t.interactive || t.fullScreen }
 
 func (t *Console) clearPage() {
 	t.headingDrawn = false
+	t.editStatus = ""
 	if t.fullScreen {
 		fmt.Fprint(t.out, erasePage)
 		if t.activity != "" {
@@ -143,7 +147,7 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 	var ended string
 	for {
 		var animation <-chan time.Time
-		if t.activity != "" {
+		if t.activity != "" && t.editStatus == "" {
 			animation = frames.C
 		}
 		select {
@@ -154,7 +158,10 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 		case item := <-t.next():
 			t.submitEntry()
 			if _, ok := item.err.(inputIssue); ok {
+				v = t.view()
+				t.setActivity(waitLabel(last))
 				t.drawMenu(v, page, last, statusErr)
+				prompt = v.commandPrompt(page == homePage, last.ID != "")
 				t.notice("33", "!", item.err.Error())
 				fmt.Fprint(t.out, prompt)
 				continue
@@ -169,25 +176,40 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 					s, err = last, statusErr
 				}
 			}
-			if nextView != v || s != last || (statusErr == nil) != (err == nil) {
-				v = nextView
-				prompt = v.commandPrompt(page == homePage, s.ID != "")
-				t.setActivity(waitLabel(s))
-				t.drawMenu(v, page, s, err)
-				if last.ID != "" && errors.Is(err, active.ErrInactive) {
-					ended = "授权已结束。"
-					if last.Phase == "disconnected" || last.Phase == "offline" {
-						ended = "直连已断开，本次授权已结束。请双方重新配对。"
-					}
-				} else if s.ID != "" {
-					ended = ""
-				}
-				if ended != "" {
-					t.notice("33", "!", ended)
-				}
-				fmt.Fprint(t.out, prompt)
-				last, statusErr = s, err
+			changed := s != last
+			if page == homePage {
+				// The home header shows the role and phase. Each IPC poll also
+				// returns a new Remaining pointer that does not change this page.
+				changed = s.ID != last.ID || s.Role != last.Role || s.Phase != last.Phase
 			}
+			changed = changed || (statusErr == nil) != (err == nil)
+			if last.ID != "" && errors.Is(err, active.ErrInactive) {
+				ended = "授权已结束。"
+				if last.Phase == "disconnected" || last.Phase == "offline" {
+					ended = "直连已断开，本次授权已结束。请双方重新配对。"
+				}
+			} else if s.ID != "" {
+				ended = ""
+			}
+			last, statusErr = s, err
+			if nextView == v && !changed && t.editStatus == "" {
+				continue
+			}
+			if !t.lineEdit.tryLock() {
+				if changed {
+					t.showEditStatus(nextView, s, err, ended)
+				}
+				continue
+			}
+			v = nextView
+			prompt = v.commandPrompt(page == homePage, s.ID != "")
+			t.setActivity(waitLabel(s))
+			t.drawMenu(v, page, s, err)
+			if ended != "" {
+				t.notice("33", "!", ended)
+			}
+			fmt.Fprint(t.out, prompt)
+			t.lineEdit.unlock()
 		}
 	}
 }
