@@ -16,6 +16,12 @@ import (
 	"peertty/internal/transport"
 )
 
+// Foreground reports one single-use session to the local grant manager.
+type Foreground interface {
+	Publish(context.Context, context.CancelFunc) error
+	Progress(phase, device, route string)
+}
+
 type Config struct {
 	Key        ed25519.PrivateKey
 	Peer, STUN string
@@ -24,6 +30,20 @@ type Config struct {
 	PairOnApproval bool
 	SSHUser        string
 	PairingCode    grant.PairingCode // Received independently by the controller.
+	Foreground     Foreground
+}
+
+func (c Config) publishForeground(ctx context.Context, cancel context.CancelFunc) error {
+	if c.Foreground == nil {
+		return nil
+	}
+	return c.Foreground.Publish(ctx, cancel)
+}
+
+func (c Config) progress(phase, device, route string) {
+	if c.Foreground != nil {
+		c.Foreground.Progress(phase, device, route)
+	}
 }
 
 // sessionPeer is the transport surface used by the one-shot CLI session.
@@ -79,6 +99,9 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 		return err
 	}
 	defer cancel()
+	if err := cfg.publishForeground(ctx, cancel); err != nil {
+		return err
+	}
 	expiry, _ := ctx.Deadline()
 	peer, err := deps.peer(ctx, cfg.STUN)
 	if err != nil {
@@ -112,6 +135,7 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	if err = code.Seal(&offer); err != nil {
 		return err
 	}
+	cfg.progress("waiting", "", "")
 	answer, err := exchange(ctx, offer, code)
 	if err != nil {
 		return err
@@ -122,6 +146,7 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	if err := grant.CheckLifetime(ctx); err != nil {
 		return err
 	}
+	cfg.progress("connecting", answer.Claims.DeviceName, "")
 	if err := peer.Accept(answer.Claims.SDP); err != nil {
 		return err
 	}
@@ -142,6 +167,7 @@ func (deps sessionIO) host(parent context.Context, cfg Config, ttl time.Duration
 	if err != nil {
 		return err
 	}
+	cfg.progress("ready", answer.Claims.DeviceName, route)
 	connected(route, conn.Temporary())
 	err = deps.run(peer.Context(), wire, conn)
 	return errors.Join(err, conn.Release())
@@ -177,6 +203,9 @@ func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ti
 		return err
 	}
 	defer cancel()
+	if err := cfg.publishForeground(ctx, cancel); err != nil {
+		return err
+	}
 	peer, err := deps.peer(ctx, cfg.STUN)
 	if err != nil {
 		return err
@@ -196,6 +225,7 @@ func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ti
 	if err := grant.CheckLifetime(ctx); err != nil {
 		return err
 	}
+	cfg.progress("waiting", offer.Claims.DeviceName, "")
 	if err := publish(answer); err != nil {
 		return err
 	}
@@ -206,6 +236,7 @@ func (deps sessionIO) control(parent context.Context, cfg Config, offer grant.Ti
 	if err := grant.CheckLifetime(ctx); err != nil {
 		return err
 	}
+	cfg.progress("ready", offer.Claims.DeviceName, route)
 	connected(route)
 	return deps.run(peer.Context(), wire, endpoint)
 }

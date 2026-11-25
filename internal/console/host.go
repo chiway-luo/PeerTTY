@@ -32,6 +32,9 @@ func (t *Console) host(ctx context.Context) error {
 
 func (t *Console) hostWith(ctx context.Context, services hostStartServices) error {
 	if current, err := services.status(ctx, t.KeyPath); err == nil {
+		if current.OneShot {
+			return active.ErrOneShot
+		}
 		if current.Role == "host" {
 			return services.watch(ctx, current)
 		}
@@ -62,6 +65,7 @@ func (t *Console) hostWith(ctx context.Context, services hostStartServices) erro
 }
 
 const hostPrompt = "回执 / p 读取 / c 复制 / v 显示 / b 返回 / q 撤销 > "
+const systemAccountScope = "系统 SSH 策略决定可登录账号"
 
 type hostPanelServices struct {
 	status  func(context.Context, string) (active.State, error)
@@ -350,7 +354,7 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 	if len(pending.Claims.SSHLoginKey) > 0 {
 		fmt.Fprintf(t.out, "批准后可直接登录当前账号 %s。\n", offer.Claims.SSHUser)
 	} else {
-		fmt.Fprintln(t.out, "每次登录使用被控机的系统 SSH 认证。")
+		fmt.Fprintln(t.out, "批准后允许这台设备连接本机 SSH。"+systemAccountScope+"，每次登录均需通过系统认证。")
 	}
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		fmt.Fprintln(t.out, "登录后，对方可以按该账号已有的 sudo 规则执行管理员命令。")

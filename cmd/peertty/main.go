@@ -35,7 +35,7 @@ const usage = `PeerTTY — peer-to-peer direct SSH for Windows, macOS and Linux
   peertty sftp        [-b 批处理文件] [传输选项...] 通过已授权直连打开 SFTP
   peertty status      显示当前授权、剩余时间和终端数
   peertty revoke      结束本机当前授权及其所有 SSH 终端
-  peertty doctor      [-stun auto|none|URL,URL] [-require-mapping]
+  peertty doctor      [-state-dir DIR | -key DEVICE.key] [-stun auto|none|URL,URL] [-require-mapping]
   peertty menu        [-state-dir DIR | -key DEVICE.key] [-stun stun:host:3478] [-ttl 1h] [-ssh-port 22] [-ssh-config FILE]
   peertty keygen      -out DEVICE.key
   peertty fingerprint -key DEVICE.key
@@ -222,12 +222,20 @@ func run(ctx context.Context, args []string) error {
 		}
 		return err
 	case "doctor":
-		stun := fs.String("stun", "auto", "auto 使用默认 STUN，可指定逗号分隔的地址或 none")
+		var opts console.Settings
+		fs.StringVar(&opts.StateDir, "state-dir", "", "本地配置目录")
+		fs.StringVar(&opts.KeyPath, "key", "", "本地配置路径")
+		fs.StringVar(&opts.STUN, "stun", "auto", "覆盖保存的 STUN 设置，仅对本次自检生效")
 		require := fs.Bool("require-mapping", false, "未取得 STUN 映射时返回退出码 1")
 		if err := parse(); err != nil {
 			return err
 		}
-		return console.NetworkCheck(ctx, os.Stdout, *stun, *require)
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "stun" {
+				opts.ExplicitSTUN = true
+			}
+		})
+		return console.Doctor(ctx, os.Stdout, opts, *require)
 	case "_menu-proxy":
 		return console.RunProxy(ctx, stdio{os.Stdin, os.Stdout}, os.Stderr)
 	case "keygen":
@@ -299,11 +307,16 @@ func runSession(ctx context.Context, command string, fs *flag.FlagSet, parse fun
 			return err
 		}
 	}
-	lease, err := grant.LeaseIdentity(path)
+	role := "control"
+	if command == "host" {
+		role = "host"
+	}
+	foreground, err := active.ReserveForeground(path, role)
 	if err != nil {
 		return err
 	}
-	defer lease.Close()
+	defer foreground.Close()
+	opts.Foreground = foreground
 	opts.Profile = path
 	if command == "host" {
 		opts.Approval = func(ctx context.Context, _ grant.PairingCode) (string, error) { return approval(ctx) }
@@ -323,6 +336,7 @@ func runSession(ctx context.Context, command string, fs *flag.FlagSet, parse fun
 }
 
 func approval(ctx context.Context) (string, error) {
+	fmt.Fprintln(os.Stderr, "Approval lets this device connect to local SSH. Your SSH server decides which accounts may log in.")
 	fmt.Fprintln(os.Stderr, "To grant this session, enter the returned answer file path (Enter cancels):")
 	type input struct {
 		path string

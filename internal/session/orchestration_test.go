@@ -72,6 +72,36 @@ func newSessionKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, key
 }
 
+type unavailableForeground struct{ err error }
+
+func (f unavailableForeground) Publish(context.Context, context.CancelFunc) error { return f.err }
+func (unavailableForeground) Progress(string, string, string)                     {}
+
+func TestForegroundControlRequiredBeforeTransport(t *testing.T) {
+	down := errors.New("local control endpoint unavailable")
+	tracker := unavailableForeground{down}
+	deps := sessionIO{peer: func(context.Context, string) (sessionPeer, error) {
+		t.Fatal("transport opened before the session could be revoked")
+		return nil, nil
+	}}
+	host := Config{PairOnApproval: true, Foreground: tracker}
+	if err := deps.host(t.Context(), host, time.Minute, 22, nil, nil); !errors.Is(err, down) {
+		t.Fatal("host lost the control endpoint error", err)
+	}
+	_, key := newSessionKeys(t)
+	offer, err := grant.NewPairingOffer(key, "invitation", "", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureCode.Seal(&offer); err != nil {
+		t.Fatal(err)
+	}
+	controller := Config{Profile: filepath.Join(t.TempDir(), "control"), PairingCode: fixtureCode, Foreground: tracker}
+	if err := deps.control(t.Context(), controller, offer, nil, nil, nil); !errors.Is(err, down) {
+		t.Fatal("controller lost the control endpoint error", err)
+	}
+}
+
 func TestHostSessionTransitions(t *testing.T) {
 	_, host := newSessionKeys(t)
 	operator, key := newSessionKeys(t)

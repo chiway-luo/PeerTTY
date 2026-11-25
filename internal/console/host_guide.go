@@ -146,7 +146,7 @@ func (t *Console) showCompactHostApproval(v terminalView, offer, answer grant.Ti
 	}
 	fmt.Fprint(out, v.hostLine("", "请核对控制方回执页上的指纹"))
 	showSessionIdentity(out, "控制设备", answer.Claims.Issuer, answer.Claims.DeviceName)
-	login := "每次登录使用系统 SSH 认证"
+	login := systemAccountScope
 	if len(answer.Claims.SSHLoginKey) > 0 {
 		login = "批准后可直接登录账号 " + offer.Claims.SSHUser
 	}

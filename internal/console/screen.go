@@ -133,11 +133,13 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 		last, statusErr = status(ctx, t.KeyPath)
 	}
 	syncActivity := func(st active.State) {
-		if page == homePage {
-			t.setStatusRow(waitLabel(st), grantClock(st))
-		} else {
-			t.setActivity(waitLabel(st))
+		activity, clock := waitLabel(st), grantClock(st)
+		if page == statusPage && clock != "" {
+			// The phase is already in the body. Keep the live clock visible
+			// at narrow widths without moving the command being edited.
+			activity = ""
 		}
+		t.setStatusRow(activity, clock)
 	}
 	syncActivity(last)
 	defer t.setActivity("")
@@ -183,12 +185,10 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 					s, err = last, statusErr
 				}
 			}
-			changed := s != last
-			if page == homePage {
-				// Compare what the page displays. A fresh IPC countdown alone
-				// only needs a cursor-preserving update to its reserved row.
-				changed = s.ID != last.ID || s.Role != last.Role || s.Phase != last.Phase || grantFactsChanged(s, last)
-			}
+			// Fresh IPC snapshots have distinct countdown pointers and local
+			// clocks. Only changes displayed in the body require a redraw.
+			changed := s.ID != last.ID || s.Role != last.Role || s.Phase != last.Phase ||
+				s.OneShot != last.OneShot || grantFactsChanged(s, last) || (s.Exchange == "") != (last.Exchange == "")
 			changed = changed || (statusErr == nil) != (err == nil)
 			if last.ID != "" && errors.Is(err, active.ErrInactive) {
 				ended = "授权已结束。"
@@ -200,9 +200,7 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 			}
 			last, statusErr = s, err
 			if nextView == v && !changed && t.editStatus == "" {
-				if page == homePage {
-					syncActivity(s)
-				}
+				syncActivity(s)
 				continue
 			}
 			if !t.lineEdit.tryLock() {

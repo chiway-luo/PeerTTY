@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"peertty/internal/active"
@@ -60,6 +62,7 @@ func TestControllerSelectsExplicitLoginWithoutStartingUnapprovedSession(t *testi
 		name                                  string
 		offer                                 grant.Ticket
 		input                                 []string
+		priorCodes                            []string
 		promptForInvite, useText, sshNotReady bool
 		status                                active.State
 		statusErr                             error
@@ -67,6 +70,8 @@ func TestControllerSelectsExplicitLoginWithoutStartingUnapprovedSession(t *testi
 		wantScoped                            bool
 	}{
 		{name: "scoped default", offer: scoped, input: []string{""}, wantUser: "robot", wantScoped: true, useText: true},
+		{name: "correct code on the same invite", offer: scoped, priorCodes: []string{"incomplete", strings.Repeat("F", 32)}, input: []string{""}, wantUser: "robot", wantScoped: true, promptForInvite: true},
+		{name: "cancel after a typo", offer: scoped, priorCodes: []string{"incomplete", "q"}, wantErr: "返回菜单"},
 		{name: "system SSH explicitly", offer: scoped, input: []string{"/ssh", "", ""}, wantUser: "robot"},
 		{name: "alternate account and key", offer: scoped, input: []string{"operator", secretPath}, wantUser: "operator", wantIdentity: secretPath},
 		{name: "normal invitation", offer: standard, input: []string{"", ""}, wantUser: "robot", promptForInvite: true},
@@ -101,7 +106,7 @@ func TestControllerSelectsExplicitLoginWithoutStartingUnapprovedSession(t *testi
 					t.Fatal(err)
 				}
 			}
-			input := append([]string{string(fixtureCode)}, tc.input...)
+			input := append(append(slices.Clone(tc.priorCodes), string(fixtureCode)), tc.input...)
 			if tc.sshNotReady || tc.name == "abort invitation prompt" {
 				input = tc.input
 			}
@@ -148,6 +153,10 @@ func TestControllerSelectsExplicitLoginWithoutStartingUnapprovedSession(t *testi
 				if calls != 1 || !errors.Is(err, startErr) {
 					t.Fatalf("start calls = %d; error = %v", calls, err)
 				}
+				if len(tc.priorCodes) != 0 && (strings.Count(log.String(), "邀请文件路径或整段邀请文本") != 1 ||
+					strings.Count(log.String(), "单独提供的一次性配对码") != 3 || !strings.Contains(log.String(), "与本次凭证不匹配")) {
+					t.Fatal("a mistyped code must allow another attempt on the same invitation")
+				}
 			} else {
 				match := err != nil && strings.Contains(err.Error(), tc.wantErr)
 				if tc.wantErr == "missing file" {
@@ -159,6 +168,16 @@ func TestControllerSelectsExplicitLoginWithoutStartingUnapprovedSession(t *testi
 			}
 		})
 	}
+}
+
+func TestPairingCodeStopsAtInvitationExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ui := &Console{out: io.Discard, pending: make(chan line)}
+		offer := grant.Ticket{Claims: grant.Claims{ExpiresMS: time.Now().Add(time.Minute).UnixMilli()}}
+		if _, err := ui.askPairingCode(t.Context(), offer); err == nil || !strings.Contains(err.Error(), "邀请已到期") {
+			t.Fatalf("expired invitation remained at the retry prompt: %v", err)
+		}
+	})
 }
 
 func TestControllerReusesOnlyReceiptForSelectedInvitation(t *testing.T) {

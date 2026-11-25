@@ -51,11 +51,11 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 	defer cancel()
 	connected := make(chan struct{})
 	go h.watchMenu(ctx, cancel, connected)
-	lease, err := grant.LeaseIdentity(h.Key)
+	foreground, err := active.ReserveForeground(h.Key, "control")
 	if err != nil {
 		return err
 	}
-	defer lease.Close()
+	defer foreground.Close()
 	offer, err := grant.Read(h.Offer)
 	if err != nil {
 		return err
@@ -83,7 +83,7 @@ func RunProxy(ctx context.Context, end bridge.Endpoint, log io.Writer) error {
 		}
 	}
 	st := active.State{Role: "control", Phase: "gathering", Deadline: offer.Deadline(), Exchange: h.Answer}
-	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN, Profile: h.Key, PairingCode: code}
+	cfg := session.Config{Key: key, Peer: h.Peer, STUN: h.STUN, Profile: h.Key, PairingCode: code, Foreground: foreground}
 	return panel.singleUseReceipt(ctx, st, h.Text, func(ctx context.Context, publish func(grant.Ticket) error, ready func(string)) error {
 		return session.RunControl(ctx, cfg, offer, end, publish, func(route string) {
 			close(connected)
@@ -150,6 +150,9 @@ func (t *Console) controlWith(ctx context.Context, invitation string, services c
 		return fmt.Errorf("邀请校验失败，请对方重新发送本次邀请 · %w", err)
 	}
 	if st, statusErr := services.status(ctx, t.KeyPath); statusErr == nil {
+		if st.OneShot {
+			return active.ErrOneShot
+		}
 		if st.Role == "control" && st.Exchange != "" {
 			answer, err := grant.Read(st.Exchange)
 			if err != nil {
@@ -163,15 +166,8 @@ func (t *Console) controlWith(ctx context.Context, invitation string, services c
 	} else if !errors.Is(statusErr, active.ErrInactive) {
 		return statusErr
 	}
-	input, err := t.prompt(ctx, "输入被控方通过可信渠道单独提供的一次性配对码 > ")
+	code, err := t.askPairingCode(ctx, offer)
 	if err != nil {
-		return err
-	}
-	code, err := grant.ParsePairingCode(input)
-	if err != nil {
-		return err
-	}
-	if err = code.VerifyProof(offer); err != nil {
 		return err
 	}
 	t.notice("32", "✓", fmt.Sprintf("邀请签名已核验，有效至 %s。", offer.Deadline().Local().Format("15:04:05")))
@@ -272,6 +268,31 @@ func (t *Console) controlWith(ctx context.Context, invitation string, services c
 	}
 	fmt.Fprintln(t.out, "控制会话已结束。")
 	return nil
+}
+
+func (t *Console) askPairingCode(ctx context.Context, offer grant.Ticket) (grant.PairingCode, error) {
+	entry, stop := context.WithDeadline(ctx, offer.Deadline())
+	defer stop()
+	for {
+		input, err := t.prompt(entry, "输入被控方通过可信渠道单独提供的一次性配对码 > ")
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if entry.Err() != nil || !time.Now().Before(offer.Deadline()) {
+			return "", errors.New("邀请已到期，请被控方重新发起授权")
+		}
+		if err != nil {
+			return "", err
+		}
+		code, err := grant.ParsePairingCode(input)
+		if err == nil {
+			err = code.VerifyProof(offer)
+		}
+		if err == nil {
+			return code, nil
+		}
+		t.notice("33", "!", err.Error()+"。请重新输入配对码，或输入 q 返回。")
+	}
 }
 
 func validSSHUser(name string) bool {

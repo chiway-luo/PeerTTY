@@ -100,7 +100,8 @@ func (c *mockReadWriteUDP) ReadFrom(p []byte) (int, net.Addr, error) {
 func TestGatheringSocketIgnoresNonDiscoveryAndPrioritizesConfirmedSTUN(t *testing.T) {
 	dead := netip.MustParseAddrPort("192.0.2.1:3478")
 	live := netip.MustParseAddrPort("192.0.2.2:19302")
-	resp := stun.MustBuild(stun.TransactionID, stun.BindingSuccess)
+	req := stun.MustBuild(stun.BindingRequest, stun.TransactionID)
+	resp := mappingResponse(req)
 	base := &mockReadWriteUDP{
 		memoryUDP: memoryUDP{writes: make(chan recordedDatagram, 20)},
 		readData:  resp.Raw,
@@ -122,7 +123,6 @@ func TestGatheringSocketIgnoresNonDiscoveryAndPrioritizesConfirmedSTUN(t *testin
 		t.Fatalf("tracked non-discovery packet as STUN server: %v", c.refreshTargets())
 	}
 
-	req := stun.MustBuild(stun.BindingRequest, stun.TransactionID)
 	_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(dead))
 	_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(live))
 	buf := make([]byte, 128)
@@ -180,24 +180,25 @@ func TestSignalingWrapsOnlyWildcardBinds(t *testing.T) {
 }
 
 func TestGatheringSocketBoundsServerListAndReturnsSnapshot(t *testing.T) {
-	c := &gatheringSocket{started: true}
+	c := &gatheringSocket{UDPConn: &mappingFixtureUDP{}, started: true}
+	req := stun.MustBuild(stun.BindingRequest, stun.TransactionID)
 	ip := netip.MustParseAddr("192.0.2.1")
 	for port := uint16(1); port <= maxTrackedSTUNServers+1; port++ {
-		c.trackServer(netip.AddrPortFrom(ip, port))
+		_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, port)))
 	}
 	known := netip.AddrPortFrom(ip, 1)
-	c.trackServer(known)
+	_, _ = c.WriteTo(req.Raw, net.UDPAddrFromAddrPort(known))
 	first := c.refreshTargets()
 	if len(first) != maxTrackedSTUNServers || first[0] != known {
 		t.Fatalf("unexpected retained server list: %v", first)
 	}
 	first[0] = netip.AddrPort{}
-	c.confirmServer(netip.AddrPortFrom(ip, maxTrackedSTUNServers+1))
+	c.confirmServer(netip.AddrPortFrom(ip, maxTrackedSTUNServers+1), req.TransactionID)
 	if got := c.refreshTargets(); len(got) != maxTrackedSTUNServers || got[0] != known {
 		t.Fatalf("untracked confirmation or snapshot mutation changed list: %v", got)
 	}
-	c.confirmServer(known)
-	c.confirmServer(known)
+	c.confirmServer(known, req.TransactionID)
+	c.confirmServer(known, req.TransactionID)
 	if got := c.refreshTargets(); len(got) != 1 || got[0] != known {
 		t.Fatalf("confirmed server was not prioritized once: %v", got)
 	}

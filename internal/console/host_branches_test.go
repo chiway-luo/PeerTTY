@@ -84,7 +84,7 @@ func TestHostPanelApprovalAndRevocation(t *testing.T) {
 		{name: "scoped then revoke", phase: "waiting", input: "\n" + standard + "\n" + scoped + "\ny\nq\n", requireScoped: true, approve: 1, revoke: 1,
 			wants: []string{"回执无效，可重新输入", "批准后可直接登录当前账号 robot", "本次授权已撤销"}},
 		{name: "discard selected reply", phase: "waiting", input: standard + "\nr\ny\nb\n", err: errBack,
-			wants: []string{"每次登录使用被控机的系统 SSH 认证", "授权继续有效"}},
+			wants: []string{"允许这台设备连接本机 SSH", "系统 SSH 策略决定可登录账号", "每次登录均需通过系统认证", "授权继续有效"}},
 		{name: "approval failure", phase: "waiting", input: standard + "\ny\n", approve: 1, failAction: true, err: actionErr},
 		{name: "ready with notice", phase: "ready", input: "v\n{}\n/back\n", note: "record diagnostic", err: errBack,
 			wants: []string{"被控会话已连接", "record diagnostic", "无法更换回执"}},

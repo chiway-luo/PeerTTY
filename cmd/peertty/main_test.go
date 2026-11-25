@@ -11,6 +11,7 @@ import (
 
 	"peertty/internal/active"
 	"peertty/internal/grant"
+	"peertty/internal/identitystate"
 	"peertty/internal/localssh"
 )
 
@@ -72,6 +73,44 @@ func TestInformationalCommands(t *testing.T) {
 	}
 	if out, err := commandOutput(t, "doctor", "-stun", "none", "-require-mapping"); err == nil || !strings.Contains(out, "映射候选 0") {
 		t.Fatalf("offline diagnostic: %q, %v", out, err)
+	}
+}
+
+func TestDoctorUsesSelectedProfileAndExplicitOverride(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "device.key")
+	settings := identitystate.RuntimePath(key, "settings.json")
+	write := func(spec string) {
+		t.Helper()
+		if err := identitystate.Replace(settings, []byte(`{"stun":"`+spec+`"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("none")
+	for _, args := range [][]string{{"-state-dir", dir}, {"-key", key}} {
+		out, err := commandOutput(t, append([]string{"doctor"}, args...)...)
+		if err != nil || !strings.Contains(out, "配置文件 "+settings) || !strings.Contains(out, "STUN 已关闭") {
+			t.Fatalf("doctor did not use the selected profile: %q / %v", out, err)
+		}
+	}
+	write("stun:127.0.0.1:3478")
+	out, err := commandOutput(t, "doctor", "-key", key, "-stun", "none")
+	if err != nil || !strings.Contains(out, "启动参数 -stun") || !strings.Contains(out, "STUN 已关闭") {
+		t.Fatalf("explicit offline setting lost: %q / %v", out, err)
+	}
+	data, err := os.ReadFile(settings)
+	if err != nil || !strings.Contains(string(data), "stun:127.0.0.1:3478") {
+		t.Fatal("doctor overwrote the saved default", err)
+	}
+	if _, err := commandOutput(t, "doctor", "-state-dir", dir, "-key", key); err == nil {
+		t.Fatal("doctor accepted conflicting profile selectors")
+	}
+	legacy := t.TempDir()
+	if err := os.Mkdir(filepath.Join(legacy, "settings.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commandOutput(t, "doctor", "-state-dir", legacy, "-stun", "none"); err != nil {
+		t.Fatal("explicit STUN unexpectedly depended on the legacy settings file", err)
 	}
 }
 

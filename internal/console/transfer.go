@@ -8,50 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"peertty/internal/active"
 	"peertty/internal/localssh"
 )
-
-// transferSSHOptions builds the common OpenSSH -o/-F/-i options shared by scp
-// and sftp so file transfers inherit the exact same host-pinning and sandbox rules.
-func transferSSHOptions(exe string, s active.State) []string {
-	args := []string{
-		"-o", "ServerAliveInterval=5",
-		"-o", "ServerAliveCountMax=5",
-		"-o", "ControlPath=none",
-		"-o", "ControlMaster=no",
-		"-o", "ClearAllForwardings=yes",
-		"-o", "ForwardAgent=no",
-		"-o", "PermitLocalCommand=no",
-		"-o", "ProxyUseFdpass=no",
-		"-o", "ConnectTimeout=45",
-		"-o", "HostKeyAlias=" + s.Alias,
-		"-o", proxyCommand(exe, runtime.GOOS, "_link-proxy"),
-	}
-	if s.KnownHosts != "" {
-		known := strconv.Quote(strings.ReplaceAll(filepath.ToSlash(s.KnownHosts), "%", "%%"))
-		args = append(args, "-F", "none",
-			"-o", "BatchMode=yes",
-			"-o", "PreferredAuthentications=publickey",
-			"-o", "IdentityAgent=none",
-			"-o", "StrictHostKeyChecking=yes",
-			"-o", "UpdateHostKeys=no",
-			"-o", "GlobalKnownHostsFile=none",
-			"-o", "UserKnownHostsFile="+known,
-		)
-	} else if s.SSHConfig != "" {
-		args = append(args, "-F", s.SSHConfig)
-	}
-	if s.Identity != "" {
-		args = append(args, "-o", "IdentitiesOnly=yes", "-i", s.Identity)
-	}
-	return args
-}
 
 func resolveTransferGrant(ctx context.Context, key string, diag io.Writer) (active.State, error) {
 	status := func(ctx context.Context) (active.State, error) { return active.Status(ctx, key) }
@@ -70,6 +32,9 @@ func resolveTransferGrantWith(ctx context.Context, diag io.Writer,
 	s, err := status(ctx)
 	if err != nil {
 		return active.State{}, err
+	}
+	if s.OneShot {
+		return active.State{}, active.ErrOneShot
 	}
 	if s.Role == "control" && s.Phase == "disconnected" {
 		if terminalFile(diag) {
@@ -106,7 +71,7 @@ func scpArgs(exe string, s active.State, recursive bool, paths []string) ([]stri
 	if len(paths) < 2 {
 		return nil, errors.New("用法: peertty cp [-r] <源路径>... <目标路径>（远端路径用 : 开头，例如 :/var/log/syslog ./）")
 	}
-	args := transferSSHOptions(exe, s)
+	args := sshOptions(exe, "_link-proxy", s)
 	if recursive {
 		args = append(args, "-r")
 	}
@@ -157,7 +122,7 @@ func sftpArgs(exe string, s active.State, extra []string) ([]string, error) {
 			break // The rest of this argument, or the next argument, is the value.
 		}
 	}
-	args := transferSSHOptions(exe, s)
+	args := sshOptions(exe, "_link-proxy", s)
 	args = append(args, extra...)
 	return append(args, "--", s.User+"@"+s.Alias), nil
 }

@@ -24,8 +24,26 @@ type networkChecks struct {
 	upnp       func(context.Context) (string, bool)
 }
 
-func NetworkCheck(ctx context.Context, out io.Writer, spec string, requireMapping bool) error {
-	return networkChecks{transport.CheckNetwork, transport.ProbeNAT, transport.CheckUPnP}.run(ctx, out, spec, requireMapping)
+// Doctor uses the same saved settings and explicit overrides as the menu.
+func Doctor(ctx context.Context, out io.Writer, opts Settings, requireMapping bool) error {
+	key, err := IdentityPath(opts.StateDir, opts.KeyPath)
+	if err != nil && (opts.StateDir != "" || opts.KeyPath != "") {
+		return err
+	}
+	opts.KeyPath = key
+	// The standalone diagnostic can also run without a config home. With an
+	// explicit STUN choice it doesn't need to open or migrate any settings.
+	if opts.ExplicitSTUN {
+		opts.stunSource = stunFlagSource
+	} else if err := opts.loadDefaults(); err != nil {
+		return err
+	}
+	return opts.networkCheck(ctx, out, requireMapping)
+}
+
+func (s Settings) networkCheck(ctx context.Context, out io.Writer, requireMapping bool) error {
+	fmt.Fprintln(out, "STUN 设置来源 ·", s.stunSource)
+	return networkChecks{transport.CheckNetwork, transport.ProbeNAT, transport.CheckUPnP}.run(ctx, out, s.STUN, requireMapping)
 }
 
 func (checks networkChecks) run(ctx context.Context, out io.Writer, spec string, requireMapping bool) error {

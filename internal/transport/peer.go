@@ -94,7 +94,7 @@ func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) 
 			network = &roamingNet{Net: network, roam: roam}
 		}
 		if len(urls) > 0 {
-			signaling = &signalingNet{Net: network, ctx: refreshCtx, interval: 15 * time.Second}
+			signaling = &signalingNet{Net: network, ctx: refreshCtx, interval: 15 * time.Second, retryDelay: time.Second}
 			network = signaling
 			config.ICEServers = []webrtc.ICEServer{{URLs: urls}}
 		}
@@ -106,15 +106,15 @@ func newPeer(parent context.Context, spec string, mode peerMode) (*Peer, error) 
 		// The signed deadline bounds the checklist. A validated path can appear
 		// even after the manual exchange or an initial extended outage.
 		settings.SetICEMaxBindingRequests(math.MaxUint16)
-		// Negotiate SCTP initialization in the signed SDP when both peers support
-		// it. A handover between DTLS and the first terminal then has no separate
-		// on-wire SCTP startup retry budget.
-		settings.EnableSctpSnap(true)
-		// Interactive streams can wait for a lone lost packet, with no later
-		// packets to trigger fast retransmit. Bound exponential backoff
-		// without changing reliability, ordering, or congestion control.
-		settings.SetSCTPRTOMax(4 * time.Second)
 	}
+	// Negotiate SCTP initialization in the signed SDP when both peers support
+	// it. Handoff after DTLS then has no separate on-wire T1-init retry budget,
+	// while older peers fall back to standard SCTP INIT.
+	settings.EnableSctpSnap(true)
+	// Interactive streams can wait for a lone lost packet, with no later
+	// packets to trigger fast retransmit. Bound exponential backoff
+	// without changing reliability, ordering, or congestion control.
+	settings.SetSCTPRTOMax(4 * time.Second)
 	settings.DetachDataChannels()
 	settings.EnableDataChannelBlockWrite(true)
 	settings.SetNetworkTypes([]webrtc.NetworkType{

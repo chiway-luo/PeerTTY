@@ -85,6 +85,10 @@ func (v terminalView) home(version string, port int, s active.State, err error) 
 			note, _, _ := strings.Cut(s.Note, "\n")
 			fmt.Fprintln(&b, v.margin+ansi.Truncate(note, v.width, "…"))
 		}
+		if s.OneShot {
+			fmt.Fprintln(&b, v.margin+"单次前台会话 · /revoke 撤销")
+			return b.String()
+		}
 		action, hint := menuAction{"2", "/host", "被控面板"}, "查看活动与邀请"
 		if s.Role == "control" {
 			action, hint = menuAction{"1", "/connect", "继续连接"}, "/receipt 查看或复制回执"
@@ -206,6 +210,10 @@ func (v terminalView) status(s active.State, err error) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, v.margin+v.grantIndicator(s, nil))
 	b.WriteString(v.grantFacts(s, false))
+	if s.OneShot {
+		fmt.Fprintln(&b, v.margin+"单次前台会话 · /revoke 撤销")
+		return b.String()
+	}
 	if s.Note != "" {
 		fmt.Fprintln(&b, v.margin+s.Note)
 	}
@@ -243,7 +251,7 @@ func (v terminalView) grantFacts(s active.State, inline bool) string {
 	}
 	if !s.Deadline.IsZero() {
 		field("授权到期", s.Deadline.Local().Format("01-02 15:04"))
-		if !inline || v.linear {
+		if v.linear {
 			field("剩余时间", s.TimeLeft().Round(time.Second).String())
 		}
 	}

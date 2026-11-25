@@ -26,6 +26,7 @@ import (
 )
 
 var ErrInactive = errors.New("当前没有有效的 PeerTTY 授权")
+var ErrOneShot = errors.New("这是单次前台会话，请在原窗口继续，或运行 peertty revoke 撤销")
 
 type State struct {
 	ID, Role, Phase, Device, User, Route, Exchange, Note string
@@ -33,6 +34,7 @@ type State struct {
 	Remaining                                            *time.Duration `json:",omitempty"`
 	localEnd                                             time.Time      // Monotonic countdown after receiving a status snapshot.
 	Terminals                                            int
+	OneShot                                              bool `json:",omitempty"`
 	RequireScoped                                        bool
 	PairingCode                                          grant.PairingCode // Host only, available to its menu over loopback mTLS.
 	// Local OpenSSH options for the authorized controller, sent only over local mTLS.

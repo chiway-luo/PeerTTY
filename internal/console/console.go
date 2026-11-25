@@ -24,6 +24,7 @@ type Settings struct {
 	SSHPort                            int
 	TTL                                time.Duration
 	NoClipboard                        bool
+	stunSource                         string
 	// Explicit* marks flags supplied on the command line so saved settings.json
 	// defaults do not override them.
 	ExplicitSTUN, ExplicitSSHPort, ExplicitTTL, ExplicitNoClipboard bool
@@ -81,12 +82,9 @@ func Run(ctx context.Context, opts Settings, in *os.File, out io.Writer) error {
 			return err
 		}
 	}
-	if opts.StateDir != "" {
-		if err := importDirectorySettings(path); err != nil {
-			return err
-		}
+	if err := opts.loadDefaults(); err != nil {
+		return err
 	}
-	applySavedSettings(&opts)
 	t := &Console{Settings: opts, in: in, out: out}
 	t.pasteTTY = pasteTerminal(in, out)
 	t.interactive = terminalFile(in) && terminalFile(out)
@@ -172,7 +170,7 @@ func (t *Console) menuWithGrantActions(ctx context.Context, actions menuGrantAct
 		case "/settings":
 			err = t.settings(ctx)
 		case "/doctor":
-			err = NetworkCheck(ctx, t.pageOut(), t.STUN, false)
+			err = t.Settings.networkCheck(ctx, t.pageOut(), false)
 		case "/check":
 			_, err = t.hostReady(ctx)
 		case "/help":
@@ -271,6 +269,9 @@ func (t *Console) settings(ctx context.Context) error {
 		return err
 	}
 	t.STUN, t.SSHPort = newSTUN, port
+	if changes.STUN != nil {
+		t.stunSource = "配置文件 " + settingsPath(t.KeyPath)
+	}
 	t.notice("32", "✓", "连接设置已应用。")
 	return nil
 }

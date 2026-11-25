@@ -56,6 +56,9 @@ func phaseName(s active.State) string {
 
 func printStatus(out io.Writer, s active.State) {
 	fmt.Fprintf(out, "%s · %s · %d 个终端 · %s 到期（剩余 %s）\n", roleNames[s.Role], phaseName(s), s.Terminals, s.Deadline.Local().Format("01-02 15:04"), s.TimeLeft().Round(time.Second))
+	if s.OneShot {
+		fmt.Fprintln(out, "单次前台会话 · peertty revoke 撤销")
+	}
 	showDeviceName(out, "对端", s.Device)
 	if s.Route != "" {
 		fmt.Fprintln(out, "直连路径  "+s.Route)
@@ -116,7 +119,15 @@ func sshArgs(exe, proxy string, s active.State, command RemoteCommand) []string 
 	if len(command.Args) > 0 && !command.TTY {
 		tty = "-T"
 	}
-	args := []string{tty, "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=5", "-o", "ControlPath=none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no",
+	args := append([]string{tty}, sshOptions(exe, proxy, s)...)
+	args = append(args, "-l", s.User, s.Alias)
+	return append(args, command.Args...)
+}
+
+// sshOptions is shared by ssh, scp and sftp so every entry point uses
+// the same proxy, host verification, identity and forwarding policy.
+func sshOptions(exe, proxy string, s active.State) []string {
+	args := []string{"-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=5", "-o", "ControlPath=none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no",
 		"-o", "PermitLocalCommand=no", "-o", "ProxyUseFdpass=no", "-o", "HostKeyAlias=" + s.Alias, "-o", proxyCommand(exe, runtime.GOOS, proxy)}
 	if proxy == "_link-proxy" {
 		// Allow the proxy's 30-second stream opening and the initial SSH handshake.
@@ -132,8 +143,7 @@ func sshArgs(exe, proxy string, s active.State, command RemoteCommand) []string 
 	if s.Identity != "" {
 		args = append(args, "-o", "IdentitiesOnly=yes", "-i", s.Identity)
 	}
-	args = append(args, "-l", s.User, s.Alias)
-	return append(args, command.Args...)
+	return args
 }
 
 func Link(ctx context.Context, key string, in *os.File, out, diag io.Writer, command RemoteCommand) error {
@@ -265,6 +275,9 @@ func linkSSH(ctx context.Context, key string, s active.State, in *os.File, out, 
 }
 
 func linkSSHWithStatus(ctx context.Context, key string, s active.State, in *os.File, out, diag io.Writer, command RemoteCommand, run func(*exec.Cmd) error, status func(context.Context) (active.State, error)) (result error) {
+	if s.OneShot {
+		return active.ErrOneShot
+	}
 	if s.Role == "control" && s.Phase == "disconnected" {
 		if terminalFile(diag) {
 			fmt.Fprintln(diag, reconnectRevokeHint)

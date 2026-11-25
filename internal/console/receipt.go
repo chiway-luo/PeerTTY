@@ -94,6 +94,9 @@ type receiptPanelServices struct {
 }
 
 func (t *Console) controlPanel(ctx context.Context, st active.State, text, review bool) error {
+	if st.OneShot {
+		return active.ErrOneShot
+	}
 	tick := time.NewTicker(spinInterval)
 	defer tick.Stop()
 	return t.receiptPanel(ctx, st, text, review, tick.C, receiptPanelServices{active.Status, t.linkSSH})

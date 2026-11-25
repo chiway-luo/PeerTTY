@@ -84,7 +84,10 @@ func TestCompactHostApprovalKeepsIdentityAndScopeInView(t *testing.T) {
 		if scoped {
 			wants = append(wants, "直接登录账号 fixture")
 		} else {
-			wants = append(wants, "系统 SSH 认证")
+			wants = append(wants, "系统 SSH 策略决定可登录账号")
+		}
+		if strings.Contains(text, "系统 SSH 策略决定可登录账号") == scoped || strings.Contains(text, "fixture") != scoped {
+			t.Fatal("approval must distinguish a scoped account from system SSH access")
 		}
 		if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
 			wants = append(wants, "已有的 sudo 规则")

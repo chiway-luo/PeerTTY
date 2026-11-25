@@ -15,6 +15,26 @@ import (
 	"peertty/internal/active"
 )
 
+func TestSSHAndTransfersUseIdenticalConnectionOptions(t *testing.T) {
+	for _, s := range []active.State{
+		{User: "user", Alias: "host", KnownHosts: "known hosts %dir", Identity: "scoped key"},
+		{User: "user", Alias: "host", SSHConfig: "custom config", Identity: "custom key"},
+	} {
+		ssh := sshArgs("peertty", "_link-proxy", s, RemoteCommand{})
+		scp, scpErr := scpArgs("peertty", s, false, []string{":/file", "./file"})
+		sftp, sftpErr := sftpArgs("peertty", s, nil)
+		if scpErr != nil || sftpErr != nil {
+			t.Fatalf("transfer args: %v / %v", scpErr, sftpErr)
+		}
+		options := ssh[1:slices.Index(ssh, "-l")]
+		for _, args := range [][]string{scp, sftp} {
+			if !slices.Equal(options, args[:slices.Index(args, "--")]) {
+				t.Fatalf("SSH and file transfer connection policies differ: %q / %q", ssh, args)
+			}
+		}
+	}
+}
+
 func TestFileTransferArgumentBoundaries(t *testing.T) {
 	s := active.State{User: "operator", Alias: "example-device", KnownHosts: "known hosts"}
 	for _, c := range []struct {

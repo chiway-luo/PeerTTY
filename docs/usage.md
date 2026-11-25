@@ -17,7 +17,7 @@ peertty
 1. 被控方运行 `peertty`，输入 `/host` 或 `2`，填写授权时长：支持 **1–24 的整数小时** 或 **1m–24h**（如 `15m`、`30m`、`1h30m`），回车采用默认 1 小时。
 2. 把邀请私发给控制方。桌面终端会尝试自动复制（Windows 使用原生剪贴板 API），看到“已复制到系统剪贴板”即可在私聊中粘贴发送。被控端可输入 `c` 再复制邀请，`v` 显示邀请全文，或 `d` 查看邀请文件路径和网络详情。输入快捷键后按回车。通过电话或另一条已核实对方身份的渠道，单独把屏幕上的一次性配对码交给控制方。
 3. 控制方运行 `peertty`，粘贴邀请并回车，或用 `/paste` 读取剪贴板。收到文件时选 `1` 并输入路径。输入单独收到的配对码，核对屏幕上的设备名。回车采用邀请里的账号，把生成的回执发回同一私聊。
-4. 被控方粘贴回执或用 `p` 读取，核对控制设备名和授权账号。同名时可通过电话核对控制端回执页上的本次会话指纹，再输入 `y`。当邀请提供当前账号登录时，控制方直接进入 SSH，无需输入对方的系统密码。
+4. 被控方粘贴回执或用 `p` 读取，核对控制设备名和授权范围，再输入 `y`。使用临时密钥时，页面显示可直接登录的账号。选择系统 SSH 时，你允许该设备连接本机 SSH，每次登录的账号和凭据由本机 SSH 服务校验。同名设备可通过电话核对回执页上的会话指纹。
 
 控制端在回执面板等待批准时，直接按回车即可再次复制。也可以输入 `c` 复制、`v` 显示全文、`b` 返回主菜单，每个快捷键输入后按回车。要找回当前授权的同一份回执，在主菜单输入 `/receipt`。配对和重连时，终端顶端的旋转标记会显示当前步骤。 控制端显示「直连已建立，正在登录 SSH」时，说明设备间的连接已经建立，但 OpenSSH 还在登录；弱网下这两步可能相隔数秒。若登录失败，先看 OpenSSH 的原始提示；只要原授权仍有效且直连可用，可以用 `/link` 重试，不必重新交换配对码。
 
@@ -54,7 +54,7 @@ peertty
 
 ## 用普通账号运行管理员命令
 
-控制方以被控机批准的系统账号登录。Linux 或 macOS 上需要 `sudo` 时，在当前 SSH 终端按目标机的提示输入密码。用 `sudo -l` 可以查看该账号获准执行的命令。是否提示密码由目标机的 sudo 规则和已有验证记录决定，默认每个终端分别验证。[sudo 验证记录说明](https://man7.org/linux/man-pages/man5/sudoers_timestamp.5.html)
+Linux 或 macOS 上需要 `sudo` 时，在当前 SSH 终端按目标机的提示输入密码。用 `sudo -l` 可以查看当前登录账号获准执行的命令。是否提示密码由目标机的 sudo 规则和已有验证记录决定，默认每个终端分别验证。[sudo 验证记录说明](https://man7.org/linux/man-pages/man5/sudoers_timestamp.5.html)
 
 | 场景 | 在控制端运行 |
 | --- | --- |
@@ -65,7 +65,7 @@ peertty
 
 ## 两端都在私网时
 
-菜单 `4 网络自检`（或 `peertty doctor`）可在配对前单独运行。默认 `auto` 会并行向 Cloudflare 和 Google 查询 UDP 映射，并执行三项诊断：
+菜单 `4 网络自检` 和 `peertty doctor` 使用当前配置保存的 STUN 设置。菜单使用了 `-state-dir` 或 `-key` 时，自检命令也传入相同参数。`doctor -stun` 可覆盖本次自检，输出会显示设置来源。默认的 `auto` 向 Cloudflare 和 Google 查询 UDP 映射，并执行以下诊断。
 
 1. **逐台 STUN 连通性**：分别报告每个 STUN 服务器返回的映射地址或超时/解析失败原因。
 2. **NAT 映射类型判别**：从同一本地 UDP 端口探测多台 STUN，自动识别“一致映射（适合打洞）”、“多出口 IP 池”或“端口随目的地变化（疑似对称型 NAT）”。
@@ -107,5 +107,7 @@ peertty help
 peertty host -offer support-01.offer -ttl 10m
 ssh -o ControlPath=none -o "ProxyCommand=peertty connect -offer support-01.offer -answer support-01.answer -code-file support.code" alice@peertty-device01
 ```
+
+`host` 和 `connect` 每次配对承载一个 SSH 连接。在任一端的另一窗口运行 `peertty status` 可查看进度，运行 `peertty revoke` 可撤销等待中的邀请或断开现有连接。使用自定义配置时，为这两个命令传入相同的 `-key`。
 
 需要额外固定双方已有的公钥时，在 `host` 和 `connect` 两端分别追加 `-key 本机密钥 -peer 对端完整指纹`。每轮仍需新配对码和人工批准。菜单支持 `-state-dir 目录` 或 `-key 配置路径`，控制方可用 `menu -ssh-config 文件` 指定 OpenSSH 配置。[OpenSSH ProxyCommand](https://man.openbsd.org/ssh_config.5#ProxyCommand)

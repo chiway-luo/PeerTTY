@@ -23,7 +23,7 @@ peertty
 1. 选 `2 允许被控制`。已有回环 SSH 服务时直接进入配对。若 22 关闭，按菜单提示检查临时服务。选“在管理员窗口打开 PeerTTY”后，完成 Windows 授权，再在新窗口选 `2`，原设备身份会随窗口保留。
 2. 缺少 OpenSSH Server 时，选菜单中的安装项。Windows 安装组件时可能创建系统防火墙规则。首次使用且缺少系统配置时，菜单可打开 Windows 服务管理器，管理员可启动 **OpenSSH SSH Server** 完成初始化，系统服务会按本机配置监听。关闭管理器后从菜单复查。[Windows OpenSSH 配置](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)
 3. 选择 **1–24 小时** 或如 `30m`，直接回车为 1 小时。把邀请通过私聊发给对方，再通过电话或另一条已核实身份的渠道单独交付配对码。邀请会尝试自动复制，也可输入 `c` 复制或 `v` 显示。
-4. 粘贴回执或输入 `p`，核对请求控制的设备名和账号，再输入 `y`。对方可在有效期内打开多个 SSH 终端或传输文件。
+4. 粘贴回执或输入 `p`，核对控制设备名和授权范围，再输入 `y`。使用临时密钥时可登录页面列出的账号。选择系统 SSH 时，可登录账号由本机 SSH 策略决定。对方可在有效期内打开多个 SSH 终端或传输文件。
 5. 关闭菜单后授权继续计时。重新运行 `peertty` 可看到状态与终端数，`/host` 回到被控面板。面板中按 `q`，或在任意终端运行 `peertty revoke`，可撤销并断开全部窗口。
 
 普通本地账号能否使用本次公钥登录，取决于本机 Windows OpenSSH 的有效配置。管理员窗口、域账号或集中管理公钥的策略使用已有 SSH 凭据。[Windows OpenSSH 账号配置](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)

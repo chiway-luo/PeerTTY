@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -18,7 +17,6 @@ import (
 	"github.com/pion/datachannel"
 	"peertty/internal/bridge"
 	"peertty/internal/grant"
-	"peertty/internal/identitystate"
 	"peertty/internal/localssh"
 	"peertty/internal/transport"
 )
@@ -125,43 +123,12 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	if opts.Role == "host" {
 		w.state.PairingCode = opts.PairingCode
 	}
-	_, localKey, err := ed25519.GenerateKey(nil)
+	closeEndpoint, err := serveControl(ctx, opts.Key, func(c *tls.Conn) { w.handle(ctx, c, cancel) })
 	if err != nil {
 		return err
 	}
-	tlsCfg, err := localTLS(localKey)
-	if err != nil {
-		return err
-	}
-	raw, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
-	listener := tls.NewListener(raw, tlsCfg)
-	defer listener.Close()
-	stopListener := context.AfterFunc(ctx, func() { listener.Close() })
-	defer stopListener()
-	// Publish atomically while holding the same identity lease as the foreground CLI.
-	discovery := opts.Key + ".active"
-	localPath := identitystate.RuntimePath(opts.Key, "control.key")
-	if err = identitystate.Replace(localPath, localKey.Seed()); err != nil {
-		return err
-	}
-	defer os.Remove(localPath)
-	tmp, err := os.CreateTemp(filepath.Dir(discovery), ".peertty-port-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	_, err = fmt.Fprintln(tmp, raw.Addr().(*net.TCPAddr).Port)
-	if err = errors.Join(err, tmp.Close()); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp.Name(), discovery); err != nil {
-		return err
-	}
-	defer os.Remove(discovery)
-	if err = send(started, reply{State: w.state.withRemaining(ctx)}); err != nil {
+	defer closeEndpoint()
+	if err = send(started, reply{State: w.snapshot().withRemaining(ctx)}); err != nil {
 		return err
 	}
 	if started == os.Stdout {
@@ -169,17 +136,6 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	}
 	clearLastError(opts.Key)
 	logWorkerEvent(w.state.ID, fmt.Sprintf("start role=%s deadline=%s", opts.Role, deadline.Format(time.RFC3339)))
-	serveDone := make(chan struct{})
-	go func() {
-		defer close(serveDone)
-		for {
-			c, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go w.handle(ctx, c.(*tls.Conn), cancel)
-		}
-	}()
 	err = w.run(ctx)
 	if err != nil && ctx.Err() == nil {
 		logWorkerEvent(w.state.ID, "offline: "+err.Error())
@@ -199,8 +155,6 @@ func Serve(parent context.Context, in io.Reader, started io.Writer) (result erro
 	w.stopping = true
 	w.mu.Unlock()
 	cancel()
-	listener.Close()
-	<-serveDone
 	w.links.Wait()
 	if w.login != nil {
 		return w.login.Close()
@@ -578,6 +532,8 @@ func (w *worker) acceptRequest(ctx context.Context, req request, now time.Time) 
 	var err error
 	if req.Op != "status" && (req.ID != s.ID || w.stopping || grant.CheckLifetime(ctx) != nil) {
 		err = errors.New("本次授权已结束")
+	} else if s.OneShot && req.Op != "status" && req.Op != "revoke" {
+		err = ErrOneShot
 	} else {
 		switch req.Op {
 		case "status":

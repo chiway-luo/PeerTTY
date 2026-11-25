@@ -20,6 +20,7 @@ func importDirectorySettings(key string) error {
 }
 
 const maxSettingsFile = 16 * 1024
+const stunFlagSource = "启动参数 -stun"
 
 type persistedSettings struct {
 	STUN        *string `json:"stun,omitempty"`
@@ -32,9 +33,23 @@ func settingsPath(keyPath string) string {
 	return identitystate.Path(keyPath, "settings.json")
 }
 
+func (s *Settings) loadDefaults() error {
+	if s.StateDir != "" {
+		if err := importDirectorySettings(s.KeyPath); err != nil {
+			return err
+		}
+	}
+	applySavedSettings(s)
+	return nil
+}
+
 // applySavedSettings loads persisted user defaults from settings.json alongside
 // the device key without overriding flags explicitly supplied on the CLI.
 func applySavedSettings(opts *Settings) {
+	opts.stunSource = "默认设置"
+	if opts.ExplicitSTUN {
+		opts.stunSource = stunFlagSource
+	}
 	path := settingsPath(opts.KeyPath)
 	if path == "" {
 		return
@@ -50,6 +65,7 @@ func applySavedSettings(opts *Settings) {
 	if !opts.ExplicitSTUN && saved.STUN != nil {
 		if _, err := transport.STUNServers(*saved.STUN); err == nil {
 			opts.STUN = *saved.STUN
+			opts.stunSource = "配置文件 " + path
 		}
 	}
 	if !opts.ExplicitSSHPort && saved.SSHPort != nil && *saved.SSHPort >= 1 && *saved.SSHPort <= 65535 {

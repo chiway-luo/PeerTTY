@@ -29,7 +29,7 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv("PEERTTY_TEST_PROXY") == "1" && len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "connect", "link", "_link-proxy", active.Command:
+		case "menu", "host", "connect", "link", "_link-proxy", active.Command:
 			main()
 			os.Exit(0)
 		}

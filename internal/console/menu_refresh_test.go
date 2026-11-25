@@ -90,3 +90,33 @@ func TestHelpPageDoesNotPollGrantOnRefresh(t *testing.T) {
 		}
 	})
 }
+
+func TestStatusTickUpdatesOnlyClockRow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		out := &transcript{changed: make(chan struct{}, 1)}
+		input := make(chan line)
+		c := &Console{out: out, fullScreen: true, pending: input}
+		prompt := c.view().commandPrompt(false, true)
+		deadline := time.Now().Add(time.Minute)
+		done := make(chan error, 1)
+		go func() {
+			got, err := c.menuChoiceWith(t.Context(), statusPage, func(context.Context, string) (active.State, error) {
+				left := time.Until(deadline)
+				return active.State{ID: "one", Role: "host", Phase: "ready", Deadline: deadline, Remaining: &left}, nil
+			})
+			if got != "/help" {
+				err = errors.New("pending input changed")
+			}
+			done <- err
+		}()
+		log := out.wait(t, "剩余 58s")
+		input <- line{text: "/help"}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		_, refresh, prompted := strings.Cut(log, prompt)
+		if !prompted || strings.Contains(refresh, erasePage) || !strings.Contains(refresh, "剩余 59s") || !strings.Contains(refresh, "剩余 58s") {
+			t.Fatalf("unexpected repaint while waiting for input: %q", refresh)
+		}
+	})
+}

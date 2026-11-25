@@ -18,6 +18,7 @@ type Options struct {
 	Peer, STUN, OfferPath, Profile string
 	Status                         io.Writer
 	PairingCode                    grant.PairingCode
+	Foreground                     Foreground
 }
 type HostOptions struct {
 	Options
@@ -27,7 +28,7 @@ type HostOptions struct {
 }
 
 func (o Options) config() Config {
-	return Config{Key: o.Key, Peer: o.Peer, STUN: o.STUN, Profile: o.Profile, PairOnApproval: o.Peer == "", PairingCode: o.PairingCode}
+	return Config{Key: o.Key, Peer: o.Peer, STUN: o.STUN, Profile: o.Profile, PairOnApproval: o.Peer == "", PairingCode: o.PairingCode, Foreground: o.Foreground}
 }
 
 func Host(ctx context.Context, o HostOptions) error {

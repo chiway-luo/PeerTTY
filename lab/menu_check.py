@@ -407,7 +407,7 @@ def check_third_identity(operator, target, dirs, programs, stun, username, invit
         third.expect("❯ ")
         third.send("1", invitation, "0" * 32)
         third.expect("配对码与本次凭证不匹配")
-        third.send("1", invitation, pairing_code, username)
+        third.send(pairing_code, username)
         if not approved.get("ssh_login_key"):
             third.send("")  # The independent controller receives no SSH private key.
         reply_path = third.expect(r"回执文件  ([^\r\n]+)\r?\n")[1]
@@ -614,10 +614,12 @@ def check(mode, artifact, cold, ending, delay=0, fallback=False, outcome="open",
             if failure:
                 count = "0" if outcome == "blocked" else "[1-9][0-9]*"
                 device.expect(rf"未建立直连。被控方（[^）]*映射候选 {count}），控制方（[^）]*映射候选 {count}）", 75)
-                control.expect(r"(?:操作结束|当前没有有效|本次授权已结束)", 75)
+                control.expect(r"(?:操作结束 ·[^\r\n]*|当前没有有效[^\r\n]*|本次授权已结束[^\r\n]*)", 75)
+                device.expect(r"(?:操作结束 ·[^\r\n]*|授权已到期。|被控会话已结束。)", 75)
                 if port22(target, "established") or (cold and port22(target)):
                     raise RuntimeError("SSH was reached without a direct path")
                 for menu in (control, device):
+                    menu.expect("❯ ", 15)
                     menu.send("0")
                     if menu.process.wait(timeout=10):
                         raise RuntimeError("menu failed to exit after the negative test")
