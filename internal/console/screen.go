@@ -48,7 +48,7 @@ func (t *Console) clearPage() {
 	t.editStatus = ""
 	if t.fullScreen {
 		fmt.Fprint(t.out, erasePage)
-		if t.activity != "" {
+		if t.hasStatusRow() {
 			t.drawActivity()
 			fmt.Fprint(t.out, "\x1b[2;1H")
 		}
@@ -132,7 +132,14 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 	if page != helpPage {
 		last, statusErr = status(ctx, t.KeyPath)
 	}
-	t.setActivity(waitLabel(last))
+	syncActivity := func(st active.State) {
+		if page == homePage {
+			t.setStatusRow(waitLabel(st), grantClock(st))
+		} else {
+			t.setActivity(waitLabel(st))
+		}
+	}
+	syncActivity(last)
 	defer t.setActivity("")
 	t.drawMenu(v, page, last, statusErr)
 	prompt := v.commandPrompt(page == homePage, last.ID != "")
@@ -159,7 +166,7 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 			t.submitEntry()
 			if _, ok := item.err.(inputIssue); ok {
 				v = t.view()
-				t.setActivity(waitLabel(last))
+				syncActivity(last)
 				t.drawMenu(v, page, last, statusErr)
 				prompt = v.commandPrompt(page == homePage, last.ID != "")
 				t.notice("33", "!", item.err.Error())
@@ -178,9 +185,9 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 			}
 			changed := s != last
 			if page == homePage {
-				// The home header shows the role and phase. Each IPC poll also
-				// returns a new Remaining pointer that does not change this page.
-				changed = s.ID != last.ID || s.Role != last.Role || s.Phase != last.Phase
+				// Compare what the page displays. A fresh IPC countdown alone
+				// only needs a cursor-preserving update to its reserved row.
+				changed = s.ID != last.ID || s.Role != last.Role || s.Phase != last.Phase || grantFactsChanged(s, last)
 			}
 			changed = changed || (statusErr == nil) != (err == nil)
 			if last.ID != "" && errors.Is(err, active.ErrInactive) {
@@ -193,17 +200,20 @@ func (t *Console) menuChoiceWith(ctx context.Context, page menuPage, status func
 			}
 			last, statusErr = s, err
 			if nextView == v && !changed && t.editStatus == "" {
+				if page == homePage {
+					syncActivity(s)
+				}
 				continue
 			}
 			if !t.lineEdit.tryLock() {
-				if changed {
+				if changed || t.editStatus != "" {
 					t.showEditStatus(nextView, s, err, ended)
 				}
 				continue
 			}
 			v = nextView
 			prompt = v.commandPrompt(page == homePage, s.ID != "")
-			t.setActivity(waitLabel(s))
+			syncActivity(s)
 			t.drawMenu(v, page, s, err)
 			if ended != "" {
 				t.notice("33", "!", ended)

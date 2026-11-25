@@ -59,6 +59,7 @@ func TestMenuAliasesRespectIntentWithoutRewritingOtherInput(t *testing.T) {
 		{"Q", "/quit", "关闭菜单"},
 		{"P", "/paste", "读取剪贴板邀请"},
 		{"2", "/host", "允许被控制"},
+		{"/status", "/status", "授权状态"},
 		{"/exit", "/quit", "关闭菜单"},
 		{"./invite", "./invite", ""},
 	} {
@@ -89,7 +90,7 @@ func TestAuthViewsExposeOnlyApplicableActions(t *testing.T) {
 		}
 		if tc.role == "host" {
 			home := v.home("dev", 22, s, nil)
-			if !strings.Contains(home, "被控面板") || !strings.Contains(home, "/status") || strings.Contains(home, "继续连接") {
+			if !strings.Contains(home, "被控面板") || strings.Contains(home, "/status") || strings.Contains(home, "继续连接") {
 				t.Fatalf("host home shows incorrect role actions: %q", home)
 			}
 		}
@@ -119,7 +120,7 @@ func TestTerminalHomeShowsSelectedControlAndNarrowHeightBudget(t *testing.T) {
 	compact := newTerminalView(46, 14, false).home("dev", 22, s, nil)
 	regular := newTerminalView(46, 20, false).home("dev", 22, s, nil)
 	for _, log := range []string{compact, regular} {
-		if !strings.Contains(log, "继续连接") || !strings.Contains(log, "/status") || strings.Contains(log, "创建邀请并核对回执") {
+		if !strings.Contains(log, "继续连接") || strings.Contains(log, "/status") || strings.Contains(log, "创建邀请并核对回执") {
 			t.Fatalf("active control home offered wrong roles: %q", log)
 		}
 	}

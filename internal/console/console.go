@@ -44,6 +44,7 @@ type Console struct {
 	section         string
 	headingDrawn    bool
 	activity        string
+	grantClock      string
 	frame           int
 }
 

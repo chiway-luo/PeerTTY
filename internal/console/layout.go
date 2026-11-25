@@ -113,8 +113,7 @@ func (v terminalView) commandPrompt(home, hasGrant bool) string {
 		footer := v.accent("/revoke") + v.muted(" 撤销授权   ") + v.accent("?") + v.muted(" 帮助   ") + v.accent("0") + v.muted(" 退出")
 		return v.composer("输入命令", footer)
 	}
-	footer := v.accent("/help") + v.muted(" 全部命令    ") + v.accent("/paste") + v.muted(" 剪贴板    ") +
-		v.accent("/status") + v.muted(" 授权状态    ") + v.accent("0") + v.muted(" 退出")
+	footer := v.accent("/help") + v.muted(" 全部命令    ") + v.accent("/paste") + v.muted(" 剪贴板    ") + v.accent("0") + v.muted(" 退出")
 	if ansi.StringWidth(footer) > v.width {
 		footer = v.accent("?") + v.muted(" 帮助   ") + v.accent("/paste") + v.muted(" 读取邀请   ") + v.accent("0") + v.muted(" 退出")
 	}

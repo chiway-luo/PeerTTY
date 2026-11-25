@@ -50,7 +50,7 @@ func menuCommand(s string) (command, title string) {
 
 func (v terminalView) grantIndicator(s active.State, err error) string {
 	if errors.Is(err, active.ErrInactive) {
-		return v.ink("36", "○ ") + "待配对"
+		return v.ink("36", "○ ") + "待配对 · 暂无授权"
 	}
 	if err != nil {
 		return v.ink("33", "! 状态不可用")
@@ -68,31 +68,41 @@ func (v terminalView) home(version string, port int, s active.State, err error) 
 		system = runtime.GOOS
 	}
 	var b strings.Builder
-	b.WriteString(v.hero(version, system, port, v.grantIndicator(s, err)))
-	left, right := connectAction, hostAction
-	leftHint, rightHint := "使用对方发来的邀请", "创建邀请并核对回执"
-	group := "选择角色"
+	actionLine := func(a menuAction) string {
+		return v.key(a.key) + " " + v.bold(a.title) + "  " + v.ink("36", a.command)
+	}
+	indicator := v.grantIndicator(s, err)
 	if err == nil && s.ID != "" {
-		group = "当前授权"
-		right, rightHint = statusAction, "查看到期时间和终端数"
-		if s.Role == "host" {
-			left, leftHint = menuAction{"2", "/host", "被控面板"}, "查看活动与邀请"
+		if v.height >= 24 {
+			b.WriteString(v.hero(version, system, port, indicator))
+			fmt.Fprintln(&b, v.margin+v.bold("当前授权"))
 		} else {
-			left, leftHint = menuAction{"1", "/connect", "继续连接"}, "/receipt 查看或复制回执"
+			b.WriteString(v.heading("当前授权"))
+			fmt.Fprintln(&b, v.margin+indicator)
+		}
+		b.WriteString(v.grantFacts(s, true))
+		if s.Note != "" {
+			note, _, _ := strings.Cut(s.Note, "\n")
+			fmt.Fprintln(&b, v.margin+ansi.Truncate(note, v.width, "…"))
+		}
+		action, hint := menuAction{"2", "/host", "被控面板"}, "查看活动与邀请"
+		if s.Role == "control" {
+			action, hint = menuAction{"1", "/connect", "继续连接"}, "/receipt 查看或复制回执"
 			if s.Phase == "waiting" {
-				leftHint = "/receipt 查看或再复制回执"
+				hint = "/receipt 查看或再复制回执"
 			}
 		}
-	}
-	if v.height >= 14 {
-		fmt.Fprintln(&b, "\n"+v.margin+v.bold(group))
-	}
-	actionLine := func(a menuAction) string {
-		key := v.accent(" › ")
-		if a.key != "" {
-			key = v.key(a.key)
+		fmt.Fprintln(&b, v.margin+actionLine(action))
+		if v.height >= 18 {
+			fmt.Fprintln(&b, v.margin+"    "+v.muted(hint))
 		}
-		return key + " " + v.bold(a.title) + "  " + v.ink("36", a.command)
+		return b.String()
+	}
+	b.WriteString(v.hero(version, system, port, indicator))
+	left, right := connectAction, hostAction
+	leftHint, rightHint := "使用对方发来的邀请", "创建邀请并核对回执"
+	if v.height >= 14 {
+		fmt.Fprintln(&b, "\n"+v.margin+v.bold("选择角色"))
 	}
 	if v.width >= 61 {
 		col := (v.width - 3) / 2
@@ -195,15 +205,7 @@ func (v terminalView) status(s active.State, err error) string {
 	}
 	var b strings.Builder
 	fmt.Fprintln(&b, v.margin+v.grantIndicator(s, nil))
-	field := func(name, value string) {
-		fmt.Fprintln(&b, v.margin+v.muted(padCells(name, 10))+value)
-	}
-	if validDeviceName(s.Device) {
-		field("对端设备", s.Device)
-	}
-	field("已连终端", strconv.Itoa(s.Terminals))
-	field("授权到期", s.Deadline.Local().Format("01-02 15:04"))
-	field("剩余时间", s.TimeLeft().Round(time.Second).String())
+	b.WriteString(v.grantFacts(s, false))
 	if s.Note != "" {
 		fmt.Fprintln(&b, v.margin+s.Note)
 	}
@@ -215,6 +217,35 @@ func (v terminalView) status(s active.State, err error) string {
 	}
 	if s.Phase == "disconnected" {
 		fmt.Fprintln(&b, v.margin+v.ink("36", "/revoke")+" 结束授权并重新配对")
+	}
+	return b.String()
+}
+
+func grantFactsChanged(s, last active.State) bool {
+	return s.Terminals != last.Terminals || s.Device != last.Device || s.Route != last.Route ||
+		!s.Deadline.Equal(last.Deadline) || s.Note != last.Note
+}
+
+func (v terminalView) grantFacts(s active.State, inline bool) string {
+	var b strings.Builder
+	field := func(name, value string) {
+		if inline {
+			value = ansi.Truncate(value, max(1, v.width-10), "…")
+		}
+		fmt.Fprintln(&b, v.margin+v.muted(padCells(name, 10))+value)
+	}
+	if validDeviceName(s.Device) {
+		field("对端设备", s.Device)
+	}
+	field("已连终端", strconv.Itoa(s.Terminals))
+	if s.Route != "" {
+		field("直连路径", s.Route)
+	}
+	if !s.Deadline.IsZero() {
+		field("授权到期", s.Deadline.Local().Format("01-02 15:04"))
+		if !inline || v.linear {
+			field("剩余时间", s.TimeLeft().Round(time.Second).String())
+		}
 	}
 	return b.String()
 }

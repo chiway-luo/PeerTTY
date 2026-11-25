@@ -3,6 +3,7 @@ package console
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -52,6 +53,7 @@ func TestHomeKeepsCookedLineAndReportsGrantClosure(t *testing.T) {
 		edit := &cookedLine{owner: make(chan struct{}, 1)}
 		c := &Console{out: &out, fullScreen: true, lineEdit: edit, pending: input}
 		closed := make(chan struct{})
+		deadline := time.Now().Add(time.Minute)
 		done := make(chan line, 1)
 		go func() {
 			text, err := c.menuChoiceWith(t.Context(), homePage, func(context.Context, string) (active.State, error) {
@@ -60,7 +62,7 @@ func TestHomeKeepsCookedLineAndReportsGrantClosure(t *testing.T) {
 					return active.State{}, active.ErrInactive
 				default:
 				}
-				s := active.State{ID: "fixture", Role: "host", Phase: "waiting"}
+				s := active.State{ID: "fixture", Role: "host", Phase: "waiting", Deadline: deadline}
 				left := time.Minute
 				s.Remaining = &left // Each status RPC returns a fresh snapshot.
 				return s, nil
@@ -81,8 +83,60 @@ func TestHomeKeepsCookedLineAndReportsGrantClosure(t *testing.T) {
 		}
 		log := out.String()
 		beforeSubmit := strings.Split(log, erasePage)
-		if len(beforeSubmit) != 3 || !strings.Contains(beforeSubmit[1], "授权已结束。") {
+		if len(beforeSubmit) != 3 || !strings.Contains(beforeSubmit[1], "剩余 59s") || !strings.Contains(beforeSubmit[1], "授权已结束。") {
 			t.Fatal("only the initial draw and submit may clear the screen; grant closure must be visible between them")
+		}
+	})
+}
+
+func TestHostUpdatesGrantWithoutErasingCookedInput(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("NO_COLOR", "1")
+		var out bytes.Buffer
+		input := make(chan line, 1)
+		edit := &cookedLine{owner: make(chan struct{}, 1)}
+		c := &Console{out: &out, fullScreen: true, lineEdit: edit, pending: input}
+		st := active.State{ID: "synthetic", Role: "host", Phase: "ready", Device: "测试设备", Route: "UDP", Deadline: time.Now().Add(time.Minute)}
+		var streams int
+		status := func(context.Context, string) (active.State, error) {
+			s := st
+			s.Terminals = streams
+			return s, nil
+		}
+		poll := make(chan time.Time)
+		done := make(chan error, 1)
+		go func() { done <- c.hostPanel(t.Context(), st, nil, poll, hostPanelServices{status: status}) }()
+		synctest.Wait()
+		if !strings.Contains(out.String(), "对端设备  测试设备") || !strings.Contains(out.String(), "已连终端  0") {
+			t.Fatalf("initial host panel omitted grant details: %q", out.String())
+		}
+		edit.owner <- struct{}{}
+		tick := func() string {
+			out.Reset()
+			time.Sleep(time.Second)
+			poll <- time.Now()
+			synctest.Wait()
+			return out.String()
+		}
+		topOnly := func(want string) {
+			t.Helper()
+			log := tick()
+			if !strings.Contains(log, want) || !strings.HasPrefix(log, "\x1b7\x1b[H") || !strings.HasSuffix(log, "\x1b8") ||
+				strings.Contains(log, erasePage) || strings.Contains(log, "\x1b[2;r") {
+				t.Fatalf("expected a cursor-preserving status update containing %q, got %q", want, log)
+			}
+		}
+		topOnly("剩余 59s")
+		streams = 1
+		topOnly("已连终端 1  剩余 58s")
+		topOnly("已连终端 1  剩余 57s")
+		edit.unlock()
+		if log := tick(); !strings.Contains(log, "已连终端  1") || !strings.Contains(log, "直连路径  UDP") {
+			t.Fatalf("host panel did not catch up after editing: %q", log)
+		}
+		input <- line{text: "b"}
+		if err := <-done; !errors.Is(err, errBack) {
+			t.Fatalf("pending return command did not survive refresh: %v", err)
 		}
 	})
 }

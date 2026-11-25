@@ -74,7 +74,7 @@ const (
 // reuses that read. Reading just one entry leaves SSH's stdin and tty intact.
 func (t *Console) next() <-chan line {
 	if t.pending == nil {
-		if t.lineEdit != nil && t.fullScreen && t.activity == "" {
+		if t.lineEdit != nil && t.fullScreen && !t.hasStatusRow() {
 			// Keep the first row available for changes to the grant while the
 			// native editor owns the rest of the screen, even for a long paste.
 			fmt.Fprint(t.out, "\x1b7\x1b[2;r\x1b8")
@@ -108,7 +108,7 @@ func pasteTerminal(in *os.File, out io.Writer) *os.File {
 }
 
 func (t *Console) finishEntry() {
-	if t.pending != nil && t.lineEdit != nil && t.fullScreen && t.activity == "" {
+	if t.pending != nil && t.lineEdit != nil && t.fullScreen && !t.hasStatusRow() {
 		fmt.Fprint(t.out, "\x1b7\x1b[r\x1b8")
 	}
 	if t.pending != nil && t.pasteTTY != nil {

@@ -31,24 +31,51 @@ func waitLabel(s active.State) string {
 	}
 }
 
-// Reserve the top row while waiting. Pasting a ticket can scroll many rows
-// below it. Updating one cell leaves the current input and cursor intact.
 func (t *Console) setActivity(label string) {
-	if !t.fullScreen || t.activity == label {
+	t.setStatusRow(label, "")
+}
+
+func (t *Console) hasStatusRow() bool {
+	return t.activity != "" || t.grantClock != ""
+}
+
+func grantClock(st active.State) string {
+	if st.ID == "" || st.Deadline.IsZero() {
+		return ""
+	}
+	return "剩余 " + st.TimeLeft().Round(time.Second).String()
+}
+
+func (t *Console) setStatusRow(activity, clock string) {
+	if !t.fullScreen || (t.activity == activity && t.grantClock == clock) {
 		return
 	}
-	t.activity, t.frame = label, 0
-	if label == "" {
+	hadRow := t.hasStatusRow()
+	if t.activity != activity {
+		t.frame = 0
+	}
+	t.activity, t.grantClock = activity, clock
+	if activity == "" && clock == "" {
 		fmt.Fprint(t.out, "\x1b7\x1b[r\x1b[H\x1b[2K\x1b8")
 		return
 	}
-	fmt.Fprint(t.out, "\x1b[2;r\x1b[2;1H")
+	// Reserve a row above the scroll region for long pastes. Only its first
+	// allocation may reposition the cursor on the editing line.
+	if !hadRow {
+		fmt.Fprint(t.out, "\x1b[2;r\x1b[2;1H")
+	}
 	t.drawActivity()
 }
 
 func (t *Console) drawActivity() {
 	v := t.view()
-	line := fmt.Sprintf("%c %s", spinFrames[t.frame], t.activity)
+	line := t.grantClock
+	if t.activity != "" {
+		line = fmt.Sprintf("%c %s", spinFrames[t.frame], t.activity)
+		if t.grantClock != "" && ansi.StringWidth(line+"  "+t.grantClock) <= v.width {
+			line += "  " + t.grantClock
+		}
+	}
 	t.writeTopRow(v, v.accent(line))
 }
 
@@ -65,6 +92,11 @@ func (t *Console) showEditStatus(v terminalView, st active.State, err error, not
 	label := v.grantIndicator(st, err)
 	if notice != "" {
 		label = v.ink("33", "! "+notice)
+	} else if err == nil && st.ID != "" {
+		label += fmt.Sprintf("  已连终端 %d", st.Terminals)
+		if clock := grantClock(st); clock != "" && ansi.StringWidth(label+"  "+clock) <= v.width {
+			label += "  " + clock
+		}
 	}
 	if t.editStatus != label && t.fullScreen && v.height > 1 {
 		t.writeTopRow(v, label)

@@ -94,12 +94,12 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 		var view terminalView
 		if live {
 			view = t.view()
-			changed = changed || view != previousView || st.Note != previous.Note || st.Route != previous.Route || st.Terminals != previous.Terminals
+			changed = changed || view != previousView || grantFactsChanged(st, previous) || t.editStatus != ""
 		}
 		if changed && live && !t.lineEdit.tryLock() {
 			t.showEditStatus(view, st, nil, "")
 		} else if changed {
-			t.setActivity(waitLabel(st))
+			t.setStatusRow(waitLabel(st), grantClock(st))
 			t.clearPage()
 			switch st.Phase {
 			case "gathering":
@@ -120,32 +120,16 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 					t.line("将邀请私发给对方，再粘贴回执或输入文件路径。")
 					fmt.Fprint(t.out, hostPrompt)
 				}
-			case "connecting":
-				t.line("已批准本次连接。正在检查 UDP 和 TCP 直连路径。")
-				if st.Note != "" {
-					t.line(st.Note)
-				}
-			case "ready":
-				t.notice("32", "●", "被控会话已连接 · "+st.Route)
-				if !t.terminalUI() {
-					t.line("b 返回，q 撤销并关闭全部终端。")
-				}
-				if st.Note != "" {
-					t.line(st.Note)
-				}
-				t.line("已连接终端 ", st.Terminals)
-			case "disconnected":
-				t.notice("33", "!", reconnectNotice)
-				if st.Note != "" {
-					t.line(st.Note)
-				}
 			}
 			if live {
-				t.liveHostPrompt()
+				t.drawLiveHost(st)
 				previousView = view
 				t.lineEdit.unlock()
 			}
 			previous = st
+		}
+		if t.editStatus == "" && t.fullScreen {
+			t.setStatusRow(t.activity, grantClock(st))
 		}
 		if input == nil && st.Phase != "gathering" {
 			input = t.next()
@@ -196,7 +180,7 @@ func (t *Console) hostPanel(ctx context.Context, st active.State, spin, poll <-c
 			switch cmd {
 			case "b", "/back":
 				if !t.fullScreen {
-					fmt.Fprintln(t.out, "授权继续有效。输入 /status 查看状态，/revoke 撤销。")
+					fmt.Fprintln(t.out, "授权继续有效。输入 /revoke 可撤销。")
 				}
 				return errBack
 			case "q", "/revoke":
@@ -309,9 +293,29 @@ func (t *Console) describeOffer(st active.State, offer grant.Ticket) {
 	}
 }
 
-func (t *Console) liveHostPrompt() {
+func (t *Console) drawLiveHost(st active.State) {
+	v := t.view()
+	switch st.Phase {
+	case "connecting":
+		t.line("已批准本次连接。正在检查 UDP 和 TCP 直连路径。")
+	case "ready":
+		if t.terminalUI() {
+			t.notice("32", "●", "被控会话已连接")
+		} else {
+			t.line("被控会话已连接 · " + st.Route)
+			t.line("b 返回，q 撤销并关闭全部终端。")
+			t.line("已连接终端 ", st.Terminals)
+		}
+	case "disconnected":
+		t.notice("33", "!", reconnectNotice)
+	}
 	if t.terminalUI() {
-		v := t.view()
+		fmt.Fprint(t.pageOut(), v.grantFacts(st, true))
+	}
+	if st.Note != "" {
+		t.line(st.Note)
+	}
+	if t.terminalUI() {
 		fmt.Fprint(t.pageOut(), v.composer("输入面板命令", v.muted("b 返回  q 撤销并关闭全部终端")))
 	}
 }
@@ -319,8 +323,7 @@ func (t *Console) liveHostPrompt() {
 func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *grant.Ticket) {
 	if st.Phase != "waiting" {
 		if t.terminalUI() {
-			fmt.Fprint(t.pageOut(), t.view().status(st, nil))
-			t.liveHostPrompt()
+			t.drawLiveHost(st)
 		} else {
 			printStatus(t.out, st)
 		}
@@ -328,14 +331,14 @@ func (t *Console) hostInputPrompt(st active.State, offer grant.Ticket, pending *
 	}
 	if pending == nil {
 		if t.terminalUI() {
-			t.setActivity(waitLabel(st))
+			t.setStatusRow(waitLabel(st), grantClock(st))
 			fmt.Fprint(t.pageOut(), t.view().hostGuide(st, ""))
 		} else {
 			fmt.Fprint(t.out, hostPrompt)
 		}
 		return
 	}
-	t.setActivity("回执已核验 · 等待本机批准")
+	t.setStatusRow("回执已核验 · 等待本机批准", grantClock(st))
 	v := t.view()
 	if t.terminalUI() && (v.height < 18 || v.width < 32) {
 		t.showCompactHostApproval(v, offer, *pending)

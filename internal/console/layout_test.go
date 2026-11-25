@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -147,6 +148,9 @@ func TestMenuFitsTerminal(t *testing.T) {
 						t.Errorf("wrong role layout: %q", row)
 					}
 				}
+				s := active.State{ID: "fixture", Role: "host", Phase: "ready", Deadline: time.Now().Add(time.Minute),
+					Device: strings.Repeat("控制设备", 8), Route: strings.Repeat("测试路径", 12), Note: strings.Repeat("测试说明", 16)}
+				check("active home", grantClock(s)+"\n"+v.home("dev", 22, s, nil)+v.commandPrompt(true, true))
 				help := check("help", v.heading("全部操作")+v.help()+v.commandPrompt(false, false))
 				if !strings.Contains(help, "▄▀ PeerTTY") {
 					t.Error("help missing compact brand")
@@ -170,12 +174,24 @@ func TestHomeShowsCurrentGrant(t *testing.T) {
 		{"control", "ready", "继续连接", "已连接 · 控制端"},
 		{"host", "waiting", "被控面板", "等待回执 · 被控端"},
 	} {
-		s := active.State{ID: "example", Role: tc.role, Phase: tc.phase}
+		s := active.State{ID: "example", Role: tc.role, Phase: tc.phase, Deadline: time.Date(2030, 3, 2, 9, 45, 0, 0, time.Local)}
+		if tc.phase == "ready" {
+			s.Device, s.Route, s.Terminals = "配对设备", "UDP", 2
+		}
 		screen := v.home("dev", 22, s, nil) + v.commandPrompt(true, true)
-		for _, word := range []string{"当前授权", tc.action, tc.state, "/status", "/revoke"} {
+		want := []string{"当前授权", tc.action, tc.state, "授权到期  03-02 09:45", "/revoke"}
+		if tc.phase == "ready" {
+			want = append(want, "对端设备  配对设备", "直连路径  UDP", "已连终端  2")
+		} else {
+			want = append(want, "已连终端  0")
+		}
+		for _, word := range want {
 			if !strings.Contains(screen, word) {
 				t.Errorf("%s %s missing %q", tc.role, tc.phase, word)
 			}
+		}
+		if strings.Contains(screen, "/status") {
+			t.Errorf("%s %s shows the lookup command on the status panel", tc.role, tc.phase)
 		}
 	}
 }
