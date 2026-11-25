@@ -1,0 +1,15 @@
+Package: peertty
+Version: 0.6.3-1
+Architecture: arm64
+Maintainer: PeerTTY Project <peertty@localhost>
+Installed-Size: 11968
+Priority: optional
+Section: net
+Filename: pool/main/p/peertty/peertty_0.6.3-1_arm64.deb
+Size: 4882178
+SHA512: d8a654b17619ab48a2229efa77440314a81b22e7833619d2a77a0a50cbe5b957d0abe59b04a9567933006c8dcb44062e4afa5c2a3c98e4834c7287fbcb96f6c8
+SHA256: db882d3a88776960e723767f424234af0715eee30ec5472c2c8ccf7942f1405f
+SHA1: 71834aa70a1c599c343a8b516badc83f72e69aea
+MD5sum: f7bba894fddc5941585017d89fd4115e
+Description: Peer-to-peer direct SSH terminal and file transfer with local approval.
+
