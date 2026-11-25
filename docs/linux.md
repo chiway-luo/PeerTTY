@@ -1,5 +1,18 @@
 # Linux 使用手册
 
+## 通过 APT 安装
+
+Debian 12、Ubuntu 22.04 及更新版本可添加 PeerTTY 软件源，支持 amd64 和 arm64。首次安装运行以下命令。
+
+```sh
+curl -fsSLo peertty.sources https://chiway-luo.github.io/PeerTTY/peertty.sources &&
+sudo install -m 0644 peertty.sources /etc/apt/sources.list.d/peertty.sources &&
+sudo apt update &&
+sudo apt install peertty
+```
+
+软件源签名公钥指纹为 `CA3D 08AE 398A 9873 A155  6DA9 0CDE C356 2B01 5AED`。
+
 ## 安装和启动
 
 安装完成后，在任意终端运行以下命令即可打开菜单。
@@ -60,6 +73,6 @@ sudo dnf install "./peertty.$(uname -m).rpm"
 
 ## 升级和卸载
 
-先用 `peertty revoke` 结束活动授权并退出菜单，在新版安装包目录重新执行对应的安装命令，再用 `peertty --version` 核对版本。卸载时，Debian / Ubuntu 运行 `sudo apt remove peertty`，Fedora / RHEL 运行 `sudo dnf remove peertty`。双方升级到兼容版本后发起新授权。
+先用 `peertty revoke` 结束活动授权并退出菜单。使用 APT 软件源时运行 `sudo apt update && sudo apt install --only-upgrade peertty`。使用本地安装包时，在新版安装包目录重新执行对应的安装命令，再用 `peertty --version` 核对版本。卸载时，Debian / Ubuntu 运行 `sudo apt remove peertty`，Fedora / RHEL 运行 `sudo dnf remove peertty`。双方升级到兼容版本后发起新授权。
 
 单文件安装沿用相同的 `install` 命令覆盖程序，卸载时运行 `sudo rm /usr/local/bin/peertty`。

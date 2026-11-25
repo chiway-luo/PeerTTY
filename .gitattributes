@@ -1,0 +1,4 @@
+# Preserve the exact bytes referenced by the signed APT Release file.
+docs/dists/** binary
+docs/pool/**/*.deb binary
+docs/peertty.sources text eol=lf

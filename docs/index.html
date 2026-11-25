@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>安装 PeerTTY</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { max-width: 48rem; margin: 3rem auto; padding: 0 1.25rem; font: 1rem/1.65 Inter, system-ui, sans-serif; }
+    h1, h2 { line-height: 1.25; }
+    h2 { margin: 2rem 0 .5rem; }
+    pre { overflow-x: auto; padding: 1rem; border: 1px solid GrayText; border-radius: .35rem; }
+    code { font-family: ui-monospace, monospace; }
+    a { text-underline-offset: .18em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>安装 PeerTTY</h1>
+    <h2>Debian 和 Ubuntu</h2>
+    <p>Debian 12 或 Ubuntu 22.04 及更新版本支持以下安装方式，适用于 amd64 和 arm64。</p>
+    <pre><code>curl -fsSLo peertty.sources https://chiway-luo.github.io/PeerTTY/peertty.sources &amp;&amp;
+sudo install -m 0644 peertty.sources /etc/apt/sources.list.d/peertty.sources &amp;&amp;
+sudo apt update &amp;&amp;
+sudo apt install peertty</code></pre>
+    <p><a href="peertty.sources" download>下载软件源配置</a> · <a href="https://github.com/chiway-luo/PeerTTY/blob/main/docs/linux.md">Linux 安装与升级</a></p>
+    <h2>Windows 和 macOS</h2>
+    <ul>
+      <li>Windows 安装包适用于 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-Windows-x64.msi">x64</a> 和 <a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-Windows-ARM64.msi">ARM64</a>。</li>
+      <li><a href="https://github.com/chiway-luo/PeerTTY/releases/latest/download/PeerTTY-macOS.pkg">macOS 通用安装包</a>适用于 Apple 芯片和 Intel。</li>
+    </ul>
+    <p>安装后在新终端运行 <code>peertty</code>。<a href="https://github.com/chiway-luo/PeerTTY/releases">全部版本和校验和</a></p>
+  </main>
+</body>
+</html>

@@ -4,7 +4,7 @@
 
 ## 从源码安装
 
-准备 Go 1.25 或更新版本，并使用有仓库访问权的账号。在 macOS、Linux 或 Windows PowerShell 中克隆项目并安装。
+准备 Go 1.25 或更新版本，在 macOS、Linux 或 Windows PowerShell 中克隆项目并安装。
 
 ```sh
 git clone https://github.com/chiway-luo/PeerTTY.git
@@ -18,7 +18,7 @@ peertty
 
 ## 获取安装包
 
-使用有仓库访问权的账号打开 Releases，下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[PeerTTY Releases](https://github.com/chiway-luo/PeerTTY/releases)
+打开 Releases，下载对应平台和架构的安装包及同版 `SHA256SUMS`。macOS 可用 `shasum -a 256 文件名`、Linux 可用 `sha256sum 文件名`、Windows PowerShell 可用 `Get-FileHash -Algorithm SHA256 文件名`，将结果与清单中同名文件的摘要核对。[PeerTTY Releases](https://github.com/chiway-luo/PeerTTY/releases)
 
 仓库 Actions 中的 **Check native installers** 提供安装与升级回归使用的构建产物。Fedora / RHEL 用户从正式 Release 下载带发行签名的 RPM 和 `peertty-rpm.asc`。[安装包构建记录](https://github.com/chiway-luo/PeerTTY/actions/workflows/installers.yml)
 
@@ -26,7 +26,7 @@ peertty
 | --- | --- | --- |
 | macOS | `PeerTTY-macOS.pkg`，Apple 芯片和 Intel 通用 | [系统安装或仅为当前用户安装](macos.md#安装和启动) |
 | Windows | x64 或 ARM64 的 `.msi` | [安装与启动](windows.md#安装和启动) |
-| Linux | Debian / Ubuntu 用 `.deb`，Fedora / RHEL 用 `.rpm` | [桌面、服务器与单文件安装](linux.md#安装和启动) |
+| Linux | Debian / Ubuntu 用 APT 软件源或 `.deb`，Fedora / RHEL 用 `.rpm` | [通过 APT 安装](linux.md#通过-apt-安装) · [本地安装包](linux.md#安装和启动) |
 
 ## 构建安装包
 
